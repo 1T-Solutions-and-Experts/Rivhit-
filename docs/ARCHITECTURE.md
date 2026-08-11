@@ -1,5 +1,9 @@
 # Architecture
 
+**Revision 2.** Sections 5–9 were rewritten after the live Rivhit documentation became
+readable; the changes are summarised in the README. Section 1–4 and 10–11 carry forward with
+corrections marked **⚠**.
+
 ## 1. Component map
 
 ```
@@ -11,10 +15,10 @@
 │  ├── record_payment      Invoices button issue a receipt, close the doc    │
 │  ├── payment_link        Invoices button create an iCredit payment page    │
 │  ├── refresh_status      Invoices button re-poll one invoice               │
-│  ├── credit_note         Invoices button cancel via חשבונית מס זיכוי        │
+│  ├── cancel_document     Invoices button cancel / credit                   │
 │  ├── customer_sync       Accounts/Contacts mass action                     │
 │  ├── product_sync        Products mass action                              │
-│  └── ar_report           Invoices mass action  open-balance / AR report    │
+│  └── ar_report           Invoices mass action  AR aging / exceptions       │
 │           │                                                                │
 │           │  ZOHO.CRM.FUNCTIONS.execute(...)   ← the ONLY path outward     │
 │           ▼                                                                │
@@ -22,12 +26,14 @@
 │  ├── rv_save_settings      persist org variables                           │
 │  ├── rv_lookup             read-only Rivhit reads (whitelisted methods)    │
 │  ├── rv_upsert_customer    Customer.Get / New / Update                     │
-│  ├── rv_issue_document     Document.New  (+ idempotency + validation)      │
+│  ├── rv_issue_document     Document.New  (check_only → real → recover)     │
 │  ├── rv_issue_receipt      Receipt.New   (+ document closing)              │
-│  ├── rv_credit_note        Document.New as credit note                     │
+│  ├── rv_close_document     Document.Close / Reopen                         │
+│  ├── rv_cancel_document    Document.Cancel (+ Receipt.Cancel)              │
+│  ├── rv_confirmation       Document.InvoiceApproval retry                  │
 │  ├── rv_recover_request    Status.LastRequest / AllRequests recovery       │
-│  ├── rv_sync_products      Item.List / New / Update / Quantity             │
-│  ├── rv_reconcile          scheduled payment + balance reconciliation      │
+│  ├── rv_sync_products      Item.* sync                                     │
+│  ├── rv_reconcile          scheduled — Customer.OpenDocuments driven       │
 │  ├── rv_icredit_get_url    iCredit GetUrl                                  │
 │  └── rv_icredit_ipn        PUBLIC REST endpoint — iCredit IPN listener     │
 │           │                                                                │
@@ -39,7 +45,7 @@
    │ api.rivhit.co.il/online│        │ icredit.rivhit.co.il/API     │
    │ static api_token       │        │ GroupPrivateToken            │
    └────────────────────────┘        └──────────────────────────────┘
-                                              │ POST (IPN)
+                                              │ POST (IPN, 1.25s budget)
                                               └──► rv_icredit_ipn
 ```
 
@@ -54,34 +60,30 @@ Rivhit is different in ways that matter:
 | | Green Invoice (Morning) | Rivhit |
 |---|---|---|
 | Credential | key id + secret → **short-lived** token | **static `api_token`, no expiry, no scopes** |
-| Revocation | rotate keys | regenerate token in the Rivhit UI (breaks every integration at once) |
-| Blast radius | issue documents | issue documents, edit customers, **post journal entries** |
+| Revocation | rotate keys | regenerate the token in Rivhit (breaks every integration at once) |
+| Blast radius | issue documents | issue documents, edit and **delete** customers, post journal entries, change company settings |
 
-A static, unscoped, non-expiring credential that can post to a company's books must not sit
-in a browser context. The Green Invoice audit already found unescaped `innerHTML` sinks in
-four of five widgets (finding H3); the same class of bug here would leak a permanent
-credential rather than a one-hour token.
+⚠ The blast radius is wider than revision 1 assumed: the current API also exposes
+`Customer.Delete`, `Company.Update`, and `Company.SetStartNumber`. A leaked token can
+renumber a company's document series.
 
 **Rule: widgets never see `api_token` or `GroupPrivateToken`, and never call Rivhit
-directly.** Widgets call named Deluge functions. Those functions read the credentials from
-org variables, call Rivhit, and return only presentation-safe data.
+directly.** Widgets call named Deluge functions, which read credentials from org variables,
+call Rivhit, and return only presentation-safe data.
 
 ### Why named functions, not one generic proxy
 
-A generic `rv_call(method, payload)` would solve credential exposure just as well, but it
-would move all payload construction into the browser. Named functions let the server enforce
-invariants the client cannot be trusted with:
+A generic `rv_call(method, payload)` would hide the credential just as well, but it would
+move payload construction into the browser. Named functions let the server enforce
+invariants the client cannot be trusted with: the document total must match the CRM invoice,
+the Rivhit customer must be the one linked to the record, the idempotency key is derived
+server-side from the CRM record id, and issuance is counted and capped.
 
-- the document total must match the CRM invoice total,
-- the Rivhit customer must be the one linked to the CRM record,
-- the idempotency key is derived server-side from the CRM record id,
-- issuance is rate-limited and counted server-side.
-
-`rv_lookup` is the one deliberately generic function, and it is safe precisely because it is
-restricted to a **whitelist of read-only methods** (`*.TypeList`, `*.List`, `Customer.Get`,
-`Customer.Balance`, `Document.Details`, `Receipt.Details`, `Accounting.VatRate`,
-`Currency.List`, `Payment.BankList`, `Item.*` reads). Anything that writes gets its own
-function.
+`rv_lookup` is the one deliberately generic function, safe because it is restricted to a
+**whitelist of read-only methods** (`*.TypeList`, `*.List`, `*.Details`, `Customer.Get`,
+`Customer.Balance`, `Customer.OpenDocuments`, `Customer.ClosedDocuments`,
+`Accounting.VatRate`, `Accounting.SortCodeList`, `Currency.List`, `Payment.BankList`,
+`Item.*` reads). Anything that writes gets its own function.
 
 ## 3. Configuration store
 
@@ -92,26 +94,26 @@ writes from widget JS return HTTP 400 on this platform.
 | Variable | Purpose |
 |---|---|
 | `API_Token` | Rivhit `api_token` |
-| `Environment` | `production` \| `demo` |
+| `Account_Mode` | `production` \| `demo` — ⚠ selects credentials, **not** a different host |
 | `Company_ID` | Rivhit company id — used to build PDF links |
-| `Doc_Type_Map` | JSON: CRM intent → Rivhit `document_type` (see §5) |
+| `Doc_Type_Map` | JSON: CRM intent → Rivhit `document_type` |
 | `Receipt_Type_Default` | Rivhit `receipt_type` for standalone receipts |
 | `Payment_Type_Map` | JSON: CRM payment method → Rivhit `payment_type` |
-| `Type_Cache` | JSON snapshot of TypeLists + VAT rate + currencies + banks, with a fetched-at stamp |
+| `Sort_Code_VAT` / `Sort_Code_Exempt` | ⚠ the VAT switch (Rivhit defaults 100 / 150, per-business) |
+| `Type_Cache` | JSON snapshot of every TypeList + VAT rate + currencies + banks + sort codes, with a fetched-at stamp |
 | `Default_Language` | `he` \| `en` — document language **and** widget UI direction |
-| `Send_Mail_Default` | whether Rivhit emails the document to the customer |
-| `Price_Include_VAT` | how unit prices are expressed (see §7) |
+| `Send_Mail_Default`, `Digital_Signature` | mailing / signed-PDF defaults |
 | `Agent_ID`, `Project_ID` | optional defaults stamped on documents |
-| `Monthly_Doc_Quota` | subscribed tier (50/200/500/1000) for the usage warning |
-| `ICredit_Enabled` | master switch for the payment-gateway features |
-| `ICredit_Group_Token_Prod` / `ICredit_Group_Token_Test` | iCredit `GroupPrivateToken` |
-| `ICredit_Test_Mode` | selects test vs prod host and token |
-| `ICredit_Issues_Document` | **critical** — `true` if iCredit is configured to issue the tax document itself, so the extension must not also issue one (§8) |
+| `Confirmation_Required` | ⚠ whether this business is in the חשבוניות ישראל regime |
+| `Monthly_Doc_Quota` | subscribed tier, for the usage warning |
+| `ICredit_Enabled` | master switch for gateway features |
+| `ICredit_Group_Token_Prod` / `ICredit_Group_Token_Test`, `ICredit_Test_Mode` | gateway credentials |
+| `ICredit_Issues_Document` | **critical** — `true` if the iCredit payment page is configured to issue the tax document itself (§8) |
 | `ICredit_IPN_Key` | the `zapikey` embedded in the public IPN URL |
 | `Reconcile_Window_Days` | rolling window for the scheduled reconciliation (default 35) |
 
 Secrets are write-only in the UI: the settings widget renders `•••• (saved)` and only
-overwrites when the admin types a new value. (Green Invoice audit finding M2.)
+overwrites when the admin types a new value.
 
 ## 4. CRM data model
 
@@ -120,209 +122,296 @@ overwrites when the admin types a new value. (Green Invoice audit finding M2.)
 Fields created by the extension manifest get namespaced API names
 (`rivhitzohocrmextension__Rivhit_Document_ID`); fields an admin creates by hand are plain.
 **Both must work, per field, in the same org.** Every read and write resolves field names at
-runtime by scanning `ZOHO.CRM.META.getFields` (widget) or one sample record's keys (Deluge),
-exactly as `resolveFields`/`_resolveOneField` do in the Green Invoice bridge. This is not
-optional polish — it is the bug that silently discarded writes there for three releases.
+runtime by scanning `ZOHO.CRM.META.getFields` (widget) or one sample record's keys (Deluge).
+This is not optional polish — it is the bug that silently discarded writes in the Green
+Invoice bridge for three releases.
 
 Avoid CRM-reserved words in API names. `Score` is reserved (learned on the Health Check
 extension); prefix everything with `Rivhit_` / `ICredit_` and never use a bare noun.
 
-### 4.2 Accounts and Contacts — the Rivhit customer card
+### 4.2 Accounts and Contacts — ⚠ the `acc_ref` correction
 
 | Field | Type | Notes |
 |---|---|---|
-| `Rivhit_Customer_ID` | Number | Rivhit `customer_id` — the join key |
+| `Rivhit_Customer_ID` | Number | Rivhit `customer_id` — **the authoritative join key** |
+| `Rivhit_Acc_Ref` | Single Line (9) | the short surrogate written into Rivhit's `acc_ref` |
 | `Rivhit_Tax_ID` | Single Line | ת.ז / ח.פ → `id_number` |
 | `Rivhit_VAT_Number` | Single Line | ע.מ → `vat_number` |
-| `Rivhit_Customer_Type` | Number | `customer_type` (card type) |
-| `Rivhit_Price_List_ID` | Number | `price_list_id` |
-| `Rivhit_Agent_ID` | Number | `agent_id` |
-| `Rivhit_Balance` | Currency 16,2 | from `Customer.Balance` |
-| `Rivhit_Balance_Updated` | Date/Time | ISO 8601 **with offset** |
-| `Rivhit_Last_Sync` | Date/Time | |
+| `Rivhit_Customer_Type` | Number | 1 customer · 20 supplier · 40–59 income/expense · 60 agent |
+| `Rivhit_Price_List_ID`, `Rivhit_Agent_ID` | Number | |
+| `Rivhit_Balance` | Currency 16,2 | |
+| `Rivhit_Balance_Updated`, `Rivhit_Last_Sync` | Date/Time | ISO 8601 **with offset** |
 | `Rivhit_Sync_Error` | Multi-line | last `client_message`, cleared on success |
 
-**`acc_ref` is the reverse pointer.** On customer creation the extension writes the Zoho
-record id into Rivhit's free-text `acc_ref` field. `Customer.Get` accepts `acc_ref`, which
-gives an exact, bidirectional mapping that survives a lost CRM field and does not depend on
-matching by name or email.
+> **Revision 1 was wrong about `acc_ref`.** It proposed storing the Zoho record id there as a
+> bidirectional key. `acc_ref` is limited to **9 characters** and Zoho record ids are 18–19
+> digits, so this cannot work.
+>
+> **Replacement.** `acc_ref` carries a 9-character surrogate: a module letter (`A` account,
+> `C` contact) plus 8 base-36 characters derived from a stable 41-bit hash of the full Zoho
+> record id. That is ~2.8 × 10¹² values, so collisions are negligible at any realistic org
+> size, and it is deterministic — recomputable without storing anything.
+>
+> It is a **recovery hint, not the key**. `Rivhit_Customer_ID` in CRM stays authoritative,
+> and the surrogate is also mirrored into `Rivhit_Acc_Ref` so a lookup can be verified rather
+> than trusted. Any match found via `acc_ref` is confirmed against name and tax id before it
+> is used.
 
 ### 4.3 Invoices — the Rivhit document
 
 | Field | Type | Notes |
 |---|---|---|
 | `Rivhit_Document_Type` | Number | per-company type code |
-| `Rivhit_Document_Number` | Number | `document_number` |
-| `Rivhit_Document_Identity` | Single Line | GUID — stable unique key, used to build the PDF URL |
-| `Rivhit_Document_URL` | URL | PDF link |
+| `Rivhit_Document_Number` | Number | |
+| `Rivhit_Document_Identity` | Single Line | GUID — stable key, builds the PDF URL |
+| `Rivhit_Document_URL` | URL | |
+| `Rivhit_Confirmation_Number` | Single Line | ⚠ **new** — Israel Tax Authority allocation number |
+| `Rivhit_Confirmation_Status` | Picklist | ⚠ **new** — `Not Required`, `Obtained`, `Missing`, `Retry Failed` |
 | `Rivhit_Issue_Date` | Date | |
-| `Rivhit_Request_Reference` | Single Line | the idempotency key we generated (§6) |
+| `Rivhit_Due_Date` | Date | |
+| `Rivhit_Request_Reference` | Single Line | idempotency key (§6) |
 | `Rivhit_Payment_Status` | Picklist | `Not Issued`, `Issued`, `Partially Paid`, `Paid`, `Cancelled` |
-| `Rivhit_Paid_Amount` | **Currency, length 16, decimals 2** | too-short numeric fields silently reject writes |
+| `Rivhit_Paid_Amount` | **Currency, length 16, decimals 2** | from `paid_amount` / `receipt_total` |
 | `Rivhit_Paid_Date` | Date | |
+| `Rivhit_Is_Closed` | Checkbox | ⚠ **new** — Rivhit's own `is_closed` |
 | `Rivhit_Last_Sync` | Date/Time | |
-| `Rivhit_Credit_Note_Number` | Number | set when cancelled |
+| `Rivhit_Cancel_Document_Number` | Number | the reversing document |
 | `ICredit_Sale_ID` | Single Line | IPN `SaleId`, also the replay-dedup key |
-| `ICredit_Payment_URL` | URL | last generated payment page |
-| `ICredit_Auth_Number` | Single Line | `TransactionAuthNum` |
-| `ICredit_Card_Last4` | Single Line | display only |
+| `ICredit_Payment_URL` | URL | |
+| `ICredit_Auth_Number`, `ICredit_Card_Last4` | Single Line | |
 
-### 4.4 Products — the Rivhit item
+### 4.4 Products
 
-`Rivhit_Item_ID`, `Rivhit_Catalog_Number` (מק"ט), `Rivhit_Item_Group_ID`,
-`Rivhit_Storage_ID`, `Rivhit_Quantity_On_Hand` (Number), `Rivhit_Quantity_Updated` (Date/Time).
+`Rivhit_Item_ID`, `Rivhit_Catalog_Number` (מק"ט, ≤15), `Rivhit_Item_Group_ID`,
+`Rivhit_Storage_ID`, `Rivhit_Quantity_On_Hand`, `Rivhit_Quantity_Updated`.
 
-### 4.5 New custom module: `Rivhit_Receipts`
+### 4.5 Custom module `Rivhit_Receipts`
 
-One record per receipt, related to the Invoice. A receipt is a distinct legal document with
-its own number and PDF; folding it into invoice fields loses partial-payment history — the
-exact gap the Green Invoice bridge had to patch with linked-document scanning.
+One record per receipt, related to the Invoice — a receipt is a distinct legal document with
+its own number and PDF, and folding it into invoice fields loses partial-payment history.
 
-Fields: `Receipt_Type`, `Receipt_Number`, `Receipt_Identity`, `Receipt_Amount`
-(Currency 16,2), `Receipt_Date`, `Payment_Method`, `Receipt_URL`, `Closed_Document_Type`,
+`Receipt_Type`, `Receipt_Number`, `Receipt_Identity`, `Receipt_Amount` (Currency 16,2),
+`Receipt_Date`, `Payment_Method`, `Receipt_URL`, `Closed_Document_Type`,
 `Closed_Document_Number`, lookup → Invoice, lookup → Account, `Source`
 (`CRM` | `iCredit` | `Rivhit`).
 
-> Naming caution: `Receipt_Number` and `Receipt_Amount` are safe, but validate every API
-> name against Zoho's reserved-word list before creating the module.
-
 ### 4.6 Audit trail
 
-Every write-side operation appends a CRM **Note** to the invoice recording: operation,
-`request_reference`, resulting document type/number, and the Rivhit `client_message`. This
-is the human-readable reconciliation trail when someone asks "why are there two invoices in
-Rivhit for this deal".
+Every write-side operation appends a CRM **Note** to the invoice: operation,
+`request_reference`, resulting document type/number, confirmation number, and Rivhit's
+`client_message`. This is the human-readable trail when someone asks why there are two
+invoices in Rivhit for one deal.
 
 ## 5. Type discovery — nothing is hardcoded
 
-Rivhit document/receipt/payment type codes are **defined per company**, not by the platform.
-The vendor's own materials already conflict: the 2015 PDF's `Payment.TypeList` example shows
-`2 = מזומן` and `4 = ישראכרט`, while the current Payments Guide shows `1 = check`,
-`4 = credit card`, `9 = bank transfer`.
+Document, receipt, and payment type codes are defined **per company**. So are sort codes.
+At setup, and behind a refresh button, the extension calls `Document.TypeList`,
+`Receipt.TypeList`, `Payment.TypeList`, `Accounting.SortCodeList`, `Currency.List`,
+`Payment.BankList` and `Accounting.VatRate`, caches them in `Type_Cache`, and asks the admin
+to map:
 
-At setup, and on a refresh button, the extension calls `Document.TypeList`,
-`Receipt.TypeList`, `Payment.TypeList`, `Currency.List`, `Payment.BankList` and
-`Accounting.VatRate`, caches them in `Type_Cache`, and asks the admin to map:
-
-- CRM intent → Rivhit document type, for: Tax Invoice, Invoice+Receipt, Credit Note,
-  Delivery Note, Price Quote, Order
+- CRM intent → Rivhit document type (tax invoice, invoice+receipt, credit, delivery note,
+  quote, order)
 - CRM `Payment_Method` picklist values → Rivhit `payment_type`
+- ⚠ VAT and exempt **sort codes** (Rivhit defaults 100 / 150, but per-business)
 
-Mapping is pre-filled by name matching and is always admin-overridable. The
-`is_invoice_receipt` flag from `Document.TypeList` tells the code whether a `payments[]`
-array is **required**; `price_include_vat` tells it how that type expects prices.
+Mappings are pre-filled by name matching and always admin-overridable. `is_invoice_receipt`
+from `Document.TypeList` tells the code whether `payments[]` is required.
 
-The Green Invoice bridge shipped a whole release cycle of broken documents because it
-assumed one VAT enum applied at two different levels of the payload. Type discovery is the
-structural fix for that class of bug.
+Rivhit's documented defaults, for pre-filling only: payment types 1 check, 2 cash, 4 Isracard,
+5 Visa, 4–8 credit cards generally, 9 bank transfer. Currencies 1 NIS, 2 USD, 3 EUR, 4 GBP,
+5 AUD, 6 CAD, 7 CHF, 8 SEK, 9 DKK, 10 NOK.
 
-## 6. Idempotency and recovery
+## 6. Idempotency, dry runs, and recovery — ⚠ strengthened
 
-Rivhit provides a real idempotency mechanism, and the design leans on it hard.
+Rivhit provides three mechanisms, and the design uses all three.
 
-- **`request_reference`** — a caller-supplied identifier attached to a write.
-- **`prevent_duplicates=true`** — Rivhit rejects a second write carrying a
-  `request_reference` it has already seen.
-- **`Status.LastRequest` / `Status.AllRequests`** — replay the original *response* for a
-  given `request_reference`.
+- **`check_only: true`** — ⚠ *new to this revision.* A full server-side validation of a
+  `Document.New` / `Receipt.New` payload that creates nothing and costs nothing. Revision 1
+  wrongly stated no preview existed and built elaborate client-side total-guessing around
+  that gap.
+- **`request_reference` + `prevent_duplicates`** — a second write with the same reference is
+  refused. Also available on `Document.Close` and `Document.Cancel`.
+- **`Status.LastRequest` / `Status.AllRequests`** — replay the original response for a
+  reference.
 
 Key derivation (server-side, deterministic):
 
 ```
 request_reference = "zcrm:" + <crm_record_id> + ":" + <intent> + ":" + <revision>
-        intent   ∈ doc | receipt | credit
-        revision  = 1, bumped only by an explicit, confirmed "issue again" action
+        intent   ∈ doc | receipt | close | cancel
+        revision  = 1, bumped only by an explicit, confirmed "issue again"
 ```
 
-The failure that matters is **the ambiguous one**: the HTTP call times out, or the response
-is unreadable, and the caller cannot tell whether a tax document now exists. Retrying is the
-wrong move — it risks a duplicate legal document and burns another metered issuance.
+**The write sequence for every billable operation:**
+
+```
+1. validate locally        totals, mappings, required fields
+2. check_only: true        Rivhit validates — free, creates nothing
+3. real call               + request_reference + prevent_duplicates
+4. ambiguous failure?      → Status.LastRequest, NEVER a retry
+```
+
+Step 2 turns "we think this payload is right" into "Rivhit agrees this payload is right"
+before a single billable issuance is spent. Step 4 handles the failure that actually matters:
 
 ```
 issue → timeout / unparseable / transport error
       └─► rv_recover_request(request_reference)
-            ├── Status.LastRequest returns the original response
-            │     └─► the document exists: persist it to CRM, report success
-            └── NO_DATA_FOUND (204)
-                  └─► nothing was created: safe to retry the SAME reference
+            ├── response returned → the document exists: persist it, report success
+            └── NO_DATA_FOUND (-2) → nothing was created: safe to retry the SAME reference
 ```
 
-`Rivhit_Request_Reference` is written to the CRM record **before** the call, so recovery is
-possible even if the browser tab is closed mid-flight.
+`Rivhit_Request_Reference` is written to CRM **before** the call, so recovery works even if
+the browser tab is closed mid-flight.
 
-## 7. Totals, VAT, and the amount-mismatch trap
+## 7. Totals and VAT — ⚠ resolved
 
-For any type where `is_invoice_receipt = true`, Rivhit rejects the document unless the
-`payments[]` total equals the document total **including VAT**
-(`DIFFERENT_AMOUNT_BETWEEN_INVOICE_AND_RECEIPT`). There is no preview endpoint, so the
-extension cannot ask Rivhit what the total will be before committing.
+Two independent switches, now confirmed:
 
-This is the same shape as the Green Invoice `2422` saga, which cost several release cycles.
-The mitigation here is to remove the disagreement rather than to guess at it:
+- **`sort_code`** — whether the document charges VAT (100 with / 150 exempt, per-business).
+- **`price_include_vat`** — whether the prices you send already include VAT.
 
-1. Send `price_include_vat = true` and pass **gross** unit prices for invoice+receipt types.
-   Then the document total is a plain sum of `price_nis × quantity` and rounding is ours to
-   control, not a server-side re-derivation we have to predict.
-2. Round every line to 2 decimals *before* summing, and make the single payment row equal
-   that sum exactly.
-3. Take the VAT rate from `Accounting.VatRate` (cached, with a TTL), never from a constant.
-   Israeli VAT has changed twice in recent years; the Green Invoice client still has
-   `0.18`/`0.17` literals in it.
-4. On `DIFFERENT_AMOUNT_...`, show the computed total, the payment total, and the difference,
-   and stop. Do not adaptively retry — every attempt is billable.
+**The design sends `price_include_vat: true` with gross prices, and makes the `payments[]`
+total exactly equal the items total.** The vendor's VAT guide confirms this is the intended
+shape for invoice-receipt types: Rivhit extracts and displays the VAT itself, so there is no
+arithmetic for the two sides to disagree about. Round each line to 2 decimals before summing.
 
-For non-payment types (plain tax invoice, quote, delivery note) the payments array is omitted
-entirely and Rivhit ignores it.
+The VAT *rate* comes from `Accounting.VatRate`, cached with a TTL — needed for display, never
+for computing what to send. (The Green Invoice client still carries `0.18`/`0.17` literals;
+Israeli VAT has changed twice in recent years.)
 
-## 8. iCredit and the double-issue hazard
+`round_digits` (automatic rounding) requires `price_include_vat: false` and only works on
+document types without a receipt, so it is incompatible with the above. Round in the mapper
+instead.
 
-iCredit can be configured, on the Rivhit side, to **issue the tax document itself** when a
-charge succeeds — the IPN carries `DocumentURL`, `DocumentNum`, `DocumentType`. If the
-extension also calls `Document.New`, the customer gets two tax documents for one payment.
+Revision 1 treated `DIFFERENT_AMOUNT_BETWEEN_INVOICE_AND_RECEIPT` as an unavoidable hazard
+requiring careful prediction. With `check_only` it is now caught for free, before committing.
 
-`ICredit_Issues_Document` makes this an explicit, mutually exclusive setting:
+## 8. iCredit
 
-- **`true`** — iCredit issues. The IPN handler *records* the document onto the CRM invoice.
-  The extension never calls `Document.New` for iCredit-paid invoices.
-- **`false`** — the extension issues. The IPN handler records the payment, then calls
-  `rv_issue_receipt` (or `rv_issue_document` for invoice+receipt) itself.
+### The double-issue hazard
 
-The settings widget states which mode is active in plain language, because getting it wrong
-is visible to the end customer.
+The iCredit payment page can be configured — **on the iCredit page settings, not per
+request** — to issue the tax document itself when a charge succeeds. The IPN then carries
+`DocumentURL`, `DocumentNum`, `DocumentType`. If the extension also calls `Document.New`, the
+customer receives two tax documents for one payment.
 
-### IPN endpoint security
+`ICredit_Issues_Document` makes this an explicit either/or:
+
+- **`true`** — iCredit issues; the IPN handler *records* the document onto the CRM invoice.
+- **`false`** — the extension issues; the IPN handler records the payment and calls
+  `rv_issue_receipt`.
+
+Because it is a page-level setting the extension cannot read, the settings screen states the
+active mode in plain language and the first test charge verifies it: if the IPN returns a
+`DocumentNum` while the setting says `false`, the widget flags the mismatch.
+
+### The IPN endpoint — ⚠ now shaped by a 1.25-second budget
 
 `rv_icredit_ipn` is a Deluge REST function published with a `zapikey`, i.e. a public URL.
-The vendor's reference C# listener leaves its security checks as `// TODO` comments. All
-four are mandatory here, in order, before any CRM write:
+
+> iCredit requires a **200 OK within 1.25 seconds** or it **resends the message**.
+
+A Deluge function that verifies with iCredit and then writes to CRM will frequently miss that
+window. **Duplicate IPNs are therefore normal operation, not an attack.** Three consequences:
+
+1. **Replay protection is load-bearing for correctness**, not just security. It must be the
+   first thing the handler does after identifying the sale, and it must be atomic enough that
+   two concurrent deliveries of the same `SaleId` cannot both proceed.
+2. **The handler always returns a top-level value**, fast, on every path. A Deluge function
+   that throws returns an error page and guarantees a resend storm.
+3. **`IPNFailureURL` is always set to a distinct endpoint.** Failure notifications otherwise
+   arrive at the same URL, and they fire on *every* failed charge attempt — a customer
+   mistyping a card three times would otherwise look like three events to reconcile.
+
+The four checks, in order, before any CRM write:
 
 1. **Verify with iCredit** — POST `SaleId`, `GroupPrivateToken`, `TransactionAmount` to
    `/API/PaymentPageRequest.svc/Verify`; require `Status == "VERIFIED"`.
 2. **Confirm the token is ours** — the IPN's `GroupPrivateToken` must equal the stored one.
-3. **Replay protection** — reject a `SaleId` already present in `ICredit_Sale_ID` or in
-   `Rivhit_Receipts`.
+3. **Replay guard** — reject a `SaleId` already recorded.
 4. **Amount check** — `TransactionAmount` must match the invoice total within ±0.01.
 
-`Custom1` carries the Zoho invoice record id out and back, which is how the IPN finds its
-record. Anything that fails a check is logged and left for a human; the invoice is never
-silently marked paid.
+`Custom1` carries the Zoho invoice record id out and back; it is unbounded, so the full id
+fits. Anything failing a check is logged and left for a human — the invoice is never silently
+marked paid.
 
-## 9. Reconciliation model
+Published iCredit source IPs (`82.80.194.52`, `81.218.62.41`, `31.168.238.28`) are recorded
+in the deployment doc for customers who front Zoho with an allowlist; the function itself
+cannot see the source IP and does not rely on it.
 
-Rivhit has no per-document "is it paid" flag. Payment state is derived:
+## 9. Reconciliation — ⚠ rebuilt, and far cheaper
 
-- **Payments we initiate** — we issue the receipt with `closed_document_type` /
-  `closed_document_number`, so the linkage is known at write time and written straight to CRM.
-- **Payments recorded directly in Rivhit** by the bookkeeper — discovered by the scheduled
-  `rv_reconcile`: pull `Receipt.List` for a rolling window, fetch `Receipt.Details` for
-  receipts not yet in `Rivhit_Receipts`, read the closed-document reference, match to the CRM
-  invoice on `(document_type, document_number)`, and update status and paid amount.
-- **Coarse safety net** — refresh `Customer.Balance` per active Account. A CRM account showing
-  invoices fully paid while Rivhit reports a non-zero balance is a reconciliation exception
-  worth surfacing in the AR report.
+Revision 1 assumed payment state had to be reconstructed by listing receipts and fetching
+each one's detail. The current API exposes it directly.
 
-`Receipt.Details`' exact closing-reference field names are **unverified** (§ API notes) and
-are the first thing to confirm in the Phase-3 spike.
+**`Customer.OpenDocuments` is the backbone.** One free call with `customer_id: 0` returns
+every open document in the business with `total_amount`, **`paid_amount`**, `balance`,
+`due_date` and `issue_date` — the entire receivables position, partial payments included.
+
+```
+rv_reconcile (scheduled, every 6h)
+  1. Customer.OpenDocuments(customer_id: 0, accounting_only: true)
+       → match rows to CRM invoices on (document_type, document_number)
+       → set Rivhit_Paid_Amount, Rivhit_Payment_Status, Rivhit_Is_Closed = false
+  2. CRM invoices that are issued-but-absent from the open list
+       → they closed since the last run: Document.Details to confirm
+         (is_closed, is_cancelled, receipt_total) and finalise
+  3. Document.List over the window
+       → catch documents issued directly in Rivhit; flag as unlinked
+       → catch confirmation_number gaps on CRM-known invoices
+  4. Customer.List → refresh balances inline (one call, not one per account)
+  5. Emit a run summary: scanned / matched / updated / unmatched / errors
+```
+
+**Single-invoice refresh** uses `Document.Details`, which returns `is_closed`,
+`is_cancelled`, `document_total`, `receipt_total`, `total_vat`, `confirmation_number`, and
+per-item `is_closed` — everything the UI needs in one call.
+
+**Payments we initiate** are known at write time: the receipt is issued with
+`closed_document_type` / `closed_document_number` / `document_is_receipt`, so CRM is updated
+from the response without waiting for a poll.
+
+All of the above are reads, so reconciliation costs nothing against the document quota.
+Loops stay sequential.
+
+### Closing model
+
+Documents are created **open**. The design uses:
+
+- **at creation** — `closed_document_type` + `closed_document_number` + `document_is_receipt`
+- **partial, by line** — item-level `closed_document_type` / `closed_document_num` /
+  `closed_document_line` (note the `_num` vs `_number` inconsistency)
+- **retroactive** — `Document.Close` with `closing_type` / `closing_number` / `amount_close`
+- **manual settlement** — `Document.Close` with `closing_type: 0`, `closing_number: 0`,
+  `document_is_receipt: true` — for payments settled entirely outside the system
+- **`Document.Reopen`** to reverse a close
+
+### Cancellation
+
+`Document.Cancel` issues the reversing credit document itself and returns its type, number,
+identity and link — revision 1's hand-built credit note is only needed for **partial**
+refunds, which still require `Document.New` with negative amounts.
+
+> An **Invoice-Receipt (type 2) requires both** `Document.Cancel` and `Receipt.Cancel`, each
+> with the same number. Calling only one leaves the books half-reversed. The cancel flow
+> checks `is_invoice_receipt` and issues both, treating them as a single unit of work with a
+> shared audit note.
+
+### Israel Tax Authority confirmation numbers
+
+For businesses in the חשבוניות ישראל regime, a qualifying invoice without an allocation
+number is a compliance defect — the customer may be unable to deduct input VAT.
+
+- `Document.New` returns `confirmation_number`; it is persisted and shown on the invoice.
+- Missing on a qualifying document → `Rivhit_Confirmation_Status = Missing`, surfaced in the
+  AR report's exceptions section, and retried by `rv_confirmation` via
+  `Document.InvoiceApproval`.
+- `rv_reconcile` re-checks for gaps using `Document.List`, which returns
+  `confirmation_number` in bulk.
+- The integration must run under the **same Rivhit user account that owns the API token**, or
+  numbers are never issued at all. This is a deployment check, not a runtime one.
 
 ## 10. Platform constraints these designs must respect
 
@@ -331,21 +420,18 @@ release cycle at least once.
 
 **Widget side**
 - Widgets must be **self-contained**. Zoho's widget CDN intermittently 404s shared asset
-  files, so a build step inlines shared JS/CSS into every widget HTML. No external
-  `<script src>` / `<link>` to bundle-local files.
-- `ZOHO.CRM.API.coql` and `searchRecords` are **unavailable** in the embedded widget SDK.
-  Use `getAllRecords` with `page`/`per_page` pagination. (Both *are* available in Deluge.)
+  files, so a build step inlines shared JS/CSS into every widget HTML.
+- `ZOHO.CRM.API.coql` and `searchRecords` are **unavailable** in the embedded widget SDK. Use
+  `getAllRecords` with pagination. (Both *are* available in Deluge.)
 - Org-variable **writes** from widget JS return 400. Reads work.
 - The SDK sometimes rejects promises with bare objects (no `.message`) — normalise before
   displaying, or the user sees `[object Object]`.
-- Ship a build marker and log it; it is the only reliable proof the new bundle actually loaded.
+- Ship a build marker and log it; it is the only reliable proof the new bundle loaded.
 
 **Deluge side**
-- Paste the **body only**. A signature line in the body is a syntax error — Sigma generates
-  the wrapper.
+- Paste the **body only**. A signature line in the body is a syntax error.
 - Arguments arrive inside `crmAPIRequest`; `arguments.get()` does not compile. Check
-  `.get("body")`, `.get("params")`, and `.get("arguments")` — which one is populated varies
-  by platform version and call form.
+  `.get("body")`, `.get("params")` and `.get("arguments")`.
 - Every function needs a **guaranteed top-level `return`**. A return inside `try/catch` does
   not satisfy the compiler.
 - `sendmail` must be followed by `return "done";`.
@@ -354,40 +440,45 @@ release cycle at least once.
 
 **CRM writes**
 - One rejected field kills the **entire** `updateRecord` call. Write critical fields first,
-  then best-effort extras (timestamps) in a separate call, and use a
-  drop-the-rejected-field-and-retry helper that logs every drop.
-- DateTime fields require ISO 8601 **with a timezone offset**; `YYYY-MM-DD HH:mm:ss` is
-  `INVALID_DATA`.
-- Currency fields must be declared long enough (16,2) or writes fail silently-ish.
+  then best-effort extras in a separate call, with a drop-the-rejected-field-and-retry helper
+  that logs every drop.
+- DateTime fields require ISO 8601 **with a timezone offset**.
+- Currency fields must be declared 16,2 or writes fail.
 
 **Rivhit protocol**
-- Errors come back as **HTTP 200 with `error_code != 0`**. Never branch on HTTP status alone.
-- Show `client_message` to users; log `debug_message` only — the API explicitly separates them.
-- `204 NO_DATA_FOUND` on a `*.List` call means "empty", not "broken".
-- Dates are `DDMMYYYY` strings. Not ISO. Not `DD/MM/YYYY`.
-- `Accounting.AddJournal` lives on a **different base URL**
-  (`/api/RivhitWebRestAPI.svc/`) than everything else (`/online/RivhitOnlineAPI.svc/`).
+- Errors arrive as **HTTP 200 or 500 with a negative `error_code`**. Never branch on HTTP
+  status alone. HTTP 400 returns **HTML**, not JSON — parse defensively.
+- Show `client_message` (Hebrew, user-facing); log `debug_message` (English identifier).
+- `error_code -2` (`NO_DATA_FOUND`) on a list call means "empty", not "broken".
+- ⚠ Dates are **`DD-MM-YYYY` or `DD/MM/YYYY`**, not `DDMMYYYY`. Responses return
+  `DD/MM/YYYY`.
+- ⚠ `Document.List` / `Receipt.List` default to **the current day** if no range is sent.
+  Always send an explicit `from_date` / `to_date`.
+- `send_mail` defaults to **true** — it emails the customer unless told otherwise.
+- Truncate every string to the documented field length before sending.
 
 ## 11. Build, test, and source-of-truth discipline
 
 The Green Invoice audit's top finding was that the source of truth was a zip file passed
 through chat sessions. This repo starts the other way round.
 
-- **Everything versioned here**: widget sources, all Deluge bodies, docs, build script.
-  A Deluge function that exists only inside Sigma does not exist.
+- **Everything versioned here**: widget sources, all Deluge bodies, docs, build script. A
+  Deluge function that exists only inside Sigma does not exist.
 - **`build.py`** validates the manifest, syntax-checks every inline script block after
-  inlining, enforces a single `VERSION` constant across manifest/markers/zip, and **refuses
-  to build if unit tests fail**.
-- **Unit tests (`node --test`, stub `ZOHO` global)** cover the pure functions that carry the
-  financial risk, because they are the cheap 20% that causes 80% of the damage:
+  inlining, enforces one `VERSION` across manifest/markers/zip, and refuses to build if unit
+  tests fail.
+- **Unit tests (`node --test`, stub `ZOHO` global)** over the pure functions that carry the
+  financial risk:
   - `mapInvoiceToRivhitDocument` — golden-payload fixture
-  - line/VAT/total arithmetic and the payments-equal-total invariant
+  - line/VAT/total arithmetic and the payments-equal-items invariant
   - `request_reference` derivation and stability
+  - the 9-character `acc_ref` surrogate — determinism and collision behaviour
   - payment-method → `payment_type` mapping, including the unmapped case
-  - Rivhit envelope parsing (`error_code`, 204, HTTP-200-with-error)
-  - `DDMMYYYY` formatting and parsing
-  - IPN verification decision logic (all four checks, each failing independently)
-- **Logic duplicated between JS and Deluge must be tested on both sides or not duplicated.**
-  In the Green Invoice bridge, `parseDocumentStatus` and its Deluge twin drifted and shipped
-  the same wrong enum in both. Prefer keeping money logic in Deluge only, and letting widgets
-  render what the function returns.
+  - envelope parsing: `error_code 0`, negative codes, `-2`, HTTP-500-with-body, HTML-on-400
+  - `DD/MM/YYYY` formatting and parsing, both directions
+  - field-length truncation
+  - IPN decision logic — all four checks, each failing independently, plus the duplicate-
+    delivery path
+- **Money logic lives in Deluge only.** In the Green Invoice bridge, `parseDocumentStatus`
+  and its Deluge twin drifted and shipped the same wrong enum in both. Widgets render what
+  the function returns.
