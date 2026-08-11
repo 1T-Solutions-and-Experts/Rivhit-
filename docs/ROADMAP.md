@@ -93,29 +93,24 @@ multi-warehouse, multi-currency.
 | R16 | `Document.List` called without a date range | ⚠ **New.** Silently returns only today's documents; reconciliation appears clean while missing everything | Always send explicit `from_date`/`to_date`; covered by a unit test |
 | R17 | Testing against production | ⚠ **New.** There is no sandbox host — a mis-set token issues real legal documents | `Account_Mode` is shown prominently in every write widget; production mode requires an extra confirmation |
 
-## 3. Open questions — need a decision before Phase 2
+## 3. Open questions
 
-Phases 0 and 1 can start without these.
+**Nine of the ten were answered on 2026-08-11** — see [`DECISIONS.md`](DECISIONS.md) for the
+answers and what each one changed. Summary: all document types supported via a catalog rather
+than a fixed map; confirmation numbers in scope; iCredit contracted **and** issuing documents
+itself; Sales Orders and Invoices both host the flows; Hebrew default; multi-currency with a
+per-document stock toggle; one company; private now with Marketplace intent.
 
-1. **Which Rivhit document types does the business actually use?** Plain tax invoice,
-   invoice+receipt, or both.
-2. **Is the business in the חשבוניות ישראל regime, and is the Tax Authority link already
-   enabled in Rivhit — under the same user account that owns the API token?** Determines
-   whether C5 is mandatory in Phase 2 or deferred.
-3. **Is iCredit already contracted?** If not, Phase 4 drops and the design simplifies
-   considerably.
-4. **If so — is the iCredit payment page configured to issue the tax document?** The single
-   most consequential setting, and it cannot be read through the API.
-5. **Expected monthly document volume, and the current tier pricing?** The published tiers
-   date from 2015 and are not in the online documentation.
-6. **Where do invoices originate — Invoices, or Deals / Sales Orders / Quotes?** Decides which
-   modules get buttons and which scopes are requested; scope changes force re-consent.
-7. **Hebrew or English as the default?** RTL affects widget layout everywhere.
-8. **Multi-currency, and should documents decrement stock?** Both add or remove whole branches
-   of the mapper.
-9. **One Rivhit company, or several?** Multi-company means per-company tokens and a company
-   selector on every write — structural, not a setting.
-10. **Private extension or Marketplace listing?**
+Still open, none of them blocking:
+
+1. **Expected monthly document volume, and the tier actually in force.** The 2015 tiers are
+   not in the current documentation and may be stale or absorbed into the subscription.
+   `Monthly_Doc_Quota` ships unset — the counter displays, no threshold fires — until this is
+   known.
+2. **Which type in the account is the order type, and which is the credit type.** Answered by
+   the admin at setup from the type catalog, not by us in advance.
+3. **Rate limits** — undocumented across all 150 vendor pages. Ask `api@rivhit.co.il`.
+4. **`Status.LastRequest` retention window** — how long recovery stays possible.
 
 ## 4. What this design deliberately does not do
 

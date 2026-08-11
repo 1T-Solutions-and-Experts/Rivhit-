@@ -44,10 +44,14 @@ bundle-local file survives.
 Types and lengths are load-bearing — an under-sized numeric field rejects writes, and one
 rejected field kills the whole `updateRecord` call.
 
-### Invoices
+### Sales Orders **and** Invoices — the identical set on both modules
 | Label | API name | Type |
 |---|---|---|
 | Rivhit Document Type | `Rivhit_Document_Type` | Number |
+| Rivhit Currency ID | `Rivhit_Currency_ID` | Number |
+| Rivhit Exchange Rate | `Rivhit_Exchange_Rate` | Decimal (6 dp) |
+| Rivhit Stock Updated | `Rivhit_Stock_Updated` | Checkbox |
+| Rivhit Closed Document Number | `Rivhit_Closed_Document_Number` | Number |
 | Rivhit Document Number | `Rivhit_Document_Number` | Number |
 | Rivhit Document Identity | `Rivhit_Document_Identity` | Single Line |
 | Rivhit Document URL | `Rivhit_Document_URL` | URL |
@@ -154,6 +158,7 @@ checks are.
 
 ```
 ZohoCRM.modules.invoices.READ        ZohoCRM.modules.invoices.UPDATE
+ZohoCRM.modules.salesorders.READ     ZohoCRM.modules.salesorders.UPDATE
 ZohoCRM.modules.accounts.READ        ZohoCRM.modules.accounts.UPDATE
 ZohoCRM.modules.contacts.READ        ZohoCRM.modules.contacts.UPDATE
 ZohoCRM.modules.products.READ        ZohoCRM.modules.products.UPDATE
@@ -163,8 +168,11 @@ ZohoCRM.org.variables.ALL
 ZohoCRM.settings.fields.READ
 ```
 
-Add `ZohoCRM.modules.deals.READ` only if invoices are raised from Deals. Scope changes force
-admin re-consent on update, so settle the final set before the first production publish.
+Sales Orders are in scope because documents originate from both modules. Deals are **not** —
+add `ZohoCRM.modules.deals.READ` only if that changes. Scope changes force admin re-consent
+on update, so settle the final set before the first production publish; the extension is
+private now but is built to Marketplace standards, and a listing will require each scope to
+be justified.
 
 ## 6. Scheduled function — required, not optional
 

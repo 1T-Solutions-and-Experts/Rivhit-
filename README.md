@@ -18,6 +18,7 @@ Proposed extension namespace: `rivhitzohocrmextension`
 
 | Doc | What it answers |
 |---|---|
+| [`docs/DECISIONS.md`](docs/DECISIONS.md) | **The confirmed parameters** — what the client answered and what each answer changed. Authoritative where it disagrees with anything else. |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | How it's built: components, trust boundary, data model, CRM fields, platform constraints |
 | [`docs/FLOWS.md`](docs/FLOWS.md) | What it does: every user action and background flow, step by step |
 | [`docs/API-NOTES-RIVHIT.md`](docs/API-NOTES-RIVHIT.md) | Verified Rivhit + iCredit reference, and the short list of what remains unconfirmed |

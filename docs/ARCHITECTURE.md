@@ -96,12 +96,14 @@ writes from widget JS return HTTP 400 on this platform.
 | `API_Token` | Rivhit `api_token` |
 | `Account_Mode` | `production` \| `demo` — ⚠ selects credentials, **not** a different host |
 | `Company_ID` | Rivhit company id — used to build PDF links |
-| `Doc_Type_Map` | JSON: CRM intent → Rivhit `document_type` |
-| `Receipt_Type_Default` | Rivhit `receipt_type` for standalone receipts |
+| `Doc_Type_Roles` | JSON, **three entries only**: `role_credit`, `role_default_sales_order`, `role_default_invoice`. Every other type is chosen at issue time from the catalog (§5) |
+| `Receipt_Type_Roles` | JSON: `role_default_receipt` |
 | `Payment_Type_Map` | JSON: CRM payment method → Rivhit `payment_type` |
 | `Sort_Code_VAT` / `Sort_Code_Exempt` | ⚠ the VAT switch (Rivhit defaults 100 / 150, per-business) |
-| `Type_Cache` | JSON snapshot of every TypeList + VAT rate + currencies + banks + sort codes, with a fetched-at stamp |
-| `Default_Language` | `he` \| `en` — document language **and** widget UI direction |
+| `Type_Cache` | JSON snapshot of the **full** document and receipt type catalogs with their flags, plus VAT rate, currencies, banks and sort codes, with a fetched-at stamp |
+| `Default_Language` | `he` \| `en` — document language **and** widget UI direction. **Ships `he`.** |
+| `Default_Currency_ID` | Rivhit currency code used when the CRM record does not specify one |
+| `Default_Update_Inventory` | initial state of the per-document "update stock" checkbox |
 | `Send_Mail_Default`, `Digital_Signature` | mailing / signed-PDF defaults |
 | `Agent_ID`, `Project_ID` | optional defaults stamped on documents |
 | `Confirmation_Required` | ⚠ whether this business is in the חשבוניות ישראל regime |
@@ -157,11 +159,19 @@ extension); prefix everything with `Rivhit_` / `ICredit_` and never use a bare n
 > than trusted. Any match found via `acc_ref` is confirmed against name and tax id before it
 > is used.
 
-### 4.3 Invoices — the Rivhit document
+### 4.3 Sales Orders and Invoices — the Rivhit document
+
+⚠ **Both modules carry the identical field set.** Documents originate from either, and a
+CRM Sales Order → Invoice progression maps onto Rivhit's Order → Invoice closing chain
+(see `DECISIONS.md` §6). Everywhere the flows say "the invoice", read "the source record".
 
 | Field | Type | Notes |
 |---|---|---|
 | `Rivhit_Document_Type` | Number | per-company type code |
+| `Rivhit_Currency_ID` | Number | 1 NIS · 2 USD · 3 EUR · 4 GBP · 5 AUD · 6 CAD · 7 CHF · 8 SEK · 9 DKK · 10 NOK |
+| `Rivhit_Exchange_Rate` | Decimal | sent for non-ILS documents |
+| `Rivhit_Stock_Updated` | Checkbox | whether this document decremented inventory |
+| `Rivhit_Closed_Document_Number` | Number | the order document this one closed, if any |
 | `Rivhit_Document_Number` | Number | |
 | `Rivhit_Document_Identity` | Single Line | GUID — stable key, builds the PDF URL |
 | `Rivhit_Document_URL` | URL | |
@@ -202,21 +212,59 @@ Every write-side operation appends a CRM **Note** to the invoice: operation,
 `client_message`. This is the human-readable trail when someone asks why there are two
 invoices in Rivhit for one deal.
 
-## 5. Type discovery — nothing is hardcoded
+## 5. The type catalog — every type the account supports
 
-Document, receipt, and payment type codes are defined **per company**. So are sort codes.
-At setup, and behind a refresh button, the extension calls `Document.TypeList`,
-`Receipt.TypeList`, `Payment.TypeList`, `Accounting.SortCodeList`, `Currency.List`,
-`Payment.BankList` and `Accounting.VatRate`, caches them in `Type_Cache`, and asks the admin
-to map:
+⚠ Revision 3 replaced the fixed six-intent map with a **catalog**. The extension supports
+*every* document and receipt type the business has configured, not a curated subset.
 
-- CRM intent → Rivhit document type (tax invoice, invoice+receipt, credit, delivery note,
-  quote, order)
-- CRM `Payment_Method` picklist values → Rivhit `payment_type`
-- ⚠ VAT and exempt **sort codes** (Rivhit defaults 100 / 150, but per-business)
+At setup, and behind a refresh button, it calls `Document.TypeList`, `Receipt.TypeList`,
+`Payment.TypeList`, `Accounting.SortCodeList`, `Currency.List`, `Payment.BankList` and
+`Accounting.VatRate`, and caches the whole result in `Type_Cache`. The issue widget renders
+the document catalog as a picker, using Rivhit's own Hebrew names.
 
-Mappings are pre-filled by name matching and always admin-overridable. `is_invoice_receipt`
-from `Document.TypeList` tells the code whether `payments[]` is required.
+**Behaviour comes from the flags Rivhit returns, never from a hardcoded table:**
+
+| Flag | Drives |
+|---|---|
+| `is_invoice_receipt` | whether `payments[]` is required, and whether the payment panel appears |
+| `price_include_vat` | the default price mode for that type |
+| `is_accounting` | whether the document affects the books — governs the confirmation-number check, inclusion in the AR report, and how strong the confirmation prompt is |
+
+**Only three document roles need an explicit mapping**, because the code reasons about them
+semantically rather than merely issuing them: `role_credit` (the negative-amount fallback when
+`Document.Cancel` does not apply), `role_default_sales_order`, and `role_default_invoice`.
+Receipts add `role_default_receipt`; receipt types with `is_invoice_receipt = true` are
+filtered out of the standalone-receipt picker because they cannot be issued alone.
+
+Admins also map CRM `Payment_Method` values → Rivhit `payment_type`, and the VAT / exempt
+**sort codes**. All mappings are pre-filled by name matching and always overridable.
+
+## 5a. Multi-currency
+
+Documents carry `currency_id` and, when not ILS, `exchange_rate`. Items in ILS send
+`price_nis`; items in another currency send `price_mtc` with a matching `currency_id`.
+Payments carry `amount_mtc`.
+
+**Every item must share the document's currency** — mixing them returns error `-68`. That is
+validated locally before the call and caught again by the `check_only` dry run.
+
+A Rivhit customer card can be pinned to a foreign currency, but only if it was set up for one
+(`pal_code`). The customer sync **never rewrites a customer's currency**; it reports the
+mismatch instead of silently altering an accounting record.
+
+## 5b. Stock control
+
+Per-document, as a deliberate choice rather than a global setting:
+
+| Control | Effect |
+|---|---|
+| **Update stock** checkbox | unchecked → `no_update_inventory: true`; the document does not decrement inventory even if its type normally would |
+| `Default_Update_Inventory` | the checkbox's initial state |
+| **Block if out of stock** | `reject_item_quantity: true` — Rivhit refuses to produce the document when an item is short |
+| `Rivhit_Storage_ID` per line | which warehouse stock leaves from; falls back to the item card |
+
+Both flags are persisted on the record and written into the audit note — "why did stock not
+move" is otherwise unanswerable after the fact.
 
 Rivhit's documented defaults, for pre-filling only: payment types 1 check, 2 cash, 4 Isracard,
 5 Visa, 4–8 credit cards generally, 9 bank transfer. Currencies 1 NIS, 2 USD, 3 EUR, 4 GBP,
