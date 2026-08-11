@@ -35,7 +35,12 @@ corrections marked **⚠**.
 │  ├── rv_sync_products      Item.* sync                                     │
 │  ├── rv_reconcile          scheduled — Customer.OpenDocuments driven       │
 │  ├── rv_icredit_get_url    iCredit GetUrl                                  │
-│  └── rv_icredit_ipn        PUBLIC REST endpoint — iCredit IPN listener     │
+│  ├── rv_icredit_ipn        PUBLIC REST endpoint — iCredit IPN listener     │
+│  └── rv_log_change         WORKFLOW-triggered — post-issuance drift note   │
+│                                                                            │
+│  Every write function checks the caller's profile against Action_          │
+│  Permissions before acting. The widget also hides what a user cannot do,   │
+│  but that is courtesy — the function is the enforcement point.             │
 │           │                                                                │
 └───────────┼────────────────────────────────────────────────────────────────┘
             │ invokeurl (HTTPS)
@@ -113,6 +118,8 @@ writes from widget JS return HTTP 400 on this platform.
 | `ICredit_Issues_Document` | **critical** — `true` if the iCredit payment page is configured to issue the tax document itself (§8) |
 | `ICredit_IPN_Key` | the `zapikey` embedded in the public IPN URL |
 | `Reconcile_Window_Days` | rolling window for the scheduled reconciliation (default 35) |
+| `Action_Permissions` | JSON matrix: action → allowed profile ids. **Enforced in Deluge, not in the widget** (§12) |
+| `Sync_State` | JSON cursors for every resumable batch job (§13) |
 
 Secrets are write-only in the UI: the settings widget renders `•••• (saved)` and only
 overwrites when the admin types a new value.
@@ -189,6 +196,14 @@ CRM Sales Order → Invoice progression maps onto Rivhit's Order → Invoice clo
 | `ICredit_Sale_ID` | Single Line | IPN `SaleId`, also the replay-dedup key |
 | `ICredit_Payment_URL` | URL | |
 | `ICredit_Auth_Number`, `ICredit_Card_Last4` | Single Line | |
+| `Rivhit_Instalments_Total` | Number | count of payment rows on the Rivhit document |
+| `Rivhit_Instalments_Elapsed` | Number | rows whose `due_date` has passed |
+| `Rivhit_Instalment_Progress` | Single Line | the `"3/12"` display |
+| `Rivhit_Next_Instalment_Date` | Date | earliest future `due_date` |
+| `Rivhit_Instalment_Amount` | Currency 16,2 | amount of the next row |
+| `Rivhit_Issued_Snapshot` | Multi-line (long) | compact snapshot of what was issued; degrades to a hash above a size threshold |
+| `Rivhit_Record_Drift` | Checkbox | the record changed after issuance |
+| `Rivhit_Drift_Detected_At` | Date/Time | |
 
 ### 4.4 Products
 

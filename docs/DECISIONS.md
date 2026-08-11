@@ -202,6 +202,120 @@ The one thing deferred: screenshots and listing copy.
 
 ---
 
+# Round 2 — decisions from the design review
+
+Answers to the three policy questions raised in [`DESIGN-REVIEW.md`](DESIGN-REVIEW.md).
+
+## 11 — Card instalments: show "payment N of X"
+
+Confirmed: display instalment progress. `Rivhit_Payment_Status` **stays `Paid`** — the receipt
+settles the full amount and the tax document is not in instalments; only the cash is. Progress
+is informational alongside it, never a contradiction of it.
+
+**Where the schedule comes from — not from counting IPNs.** A standard credit-card instalment
+sale (תשלומים) is authorised once. iCredit fires **one** IPN; there is no notification per
+instalment. (Recurring sales are different and do fire per cycle — that is a separate feature,
+Phase 6.) So progress cannot be event-driven.
+
+It also should not be computed from "months since the charge", which is a guess. The real
+schedule already exists in the accounting record: Rivhit's `number_of_payments` splits a
+payment into rows with consecutive monthly due dates, and those rows come back in
+`Document.Details` / `Receipt.Details` as `payments[]`, each with its own `due_date` and
+`amount`.
+
+```
+Rivhit_Instalments_Total     = count of payment rows
+Rivhit_Instalments_Elapsed   = rows whose due_date <= today
+Rivhit_Instalment_Progress   = "3/12"        ← the display the client asked for
+Rivhit_Next_Instalment_Date  = earliest due_date > today
+Rivhit_Instalment_Amount     = amount of the next row
+```
+
+Grounded in Rivhit's own record rather than arithmetic on a charge date, so it stays correct if
+the schedule is edited in Rivhit. Refreshed by `rv_reconcile` and by the single-record refresh.
+
+The IPN's `TransactionNumOfPayment`, `TransactionCreditTerms`, `TransactionFirstAmount` and
+`TransactionNonFirstAmount` are captured at charge time as a cross-check: a disagreement between
+what iCredit reported and what Rivhit's rows say is a reconciliation exception, not something to
+silently pick a winner for.
+
+The AR report gains an **expected cash** column driven by these rows — which is what the
+instalment question was really about.
+
+## 12 — Record drift: a note on every change, no lock
+
+Confirmed: no validation-rule lock. Every change to a record after its document was issued gets
+a CRM Note.
+
+**The important design point: this must not live in the widget.** A hash check on widget open
+only catches edits made by someone who then happens to open the widget — and the risky edits are
+exactly the ones made in the ordinary record view by someone not thinking about Rivhit at all.
+
+**Mechanism — a Zoho workflow rule, not widget code.**
+
+```
+Workflow rule on Sales Orders and Invoices
+  trigger:   on edit
+  condition: Rivhit_Document_Number is not empty
+  action:    function rv_log_change
+```
+
+`rv_log_change` recomputes a compact snapshot of the material fields — line descriptions,
+quantities, prices, totals, currency, customer — diffs it against `Rivhit_Issued_Snapshot`
+captured at issue time, and when they differ:
+
+1. appends a CRM Note naming **which fields changed, old → new, by whom, when**, and stating
+   plainly that the Rivhit document is unchanged and remains the legal record;
+2. sets `Rivhit_Record_Drift` and `Rivhit_Drift_Detected_At`.
+
+The widget then shows a banner with the diff and the two legitimate paths — cancel and re-issue,
+or revert the record — and the AR report lists drifted records under exceptions. Nothing is
+blocked; it is made visible and attributable.
+
+**Practical notes.** The rule is conditioned tightly on `Rivhit_Document_Number` being non-empty,
+so it never fires on ordinary pre-issue editing. The snapshot lives in a long-text field; above a
+size threshold it degrades to a hash, and the note then says *what* changed without old → new
+values rather than failing. Repeated edits append notes rather than overwriting, because the
+sequence of changes is the audit trail.
+
+## 13 — Profile-based access control, configured in Settings
+
+Confirmed: a permissions matrix in the settings widget, populated from the org's real profiles.
+
+**Design.** Settings gains a **Permissions** tab: rows are actions, columns are the profiles read
+live from the org, cells are checkboxes. Persisted as JSON in `Action_Permissions`.
+
+| Action | Default |
+|---|---|
+| Issue document · Record payment · Close / settle · Cancel · Get confirmation number | Administrator only |
+| Payment link | Administrator only |
+| Sync customers · Sync products · Save settings | Administrator only |
+| Refresh status · AR report | everyone |
+
+> ### The enforcement point is the Deluge function, not the widget
+>
+> Hiding a button is a courtesy, not a control — anyone can invoke a function directly. **Every
+> write function checks the caller's profile against the matrix before doing anything**, and
+> returns a refusal the widget renders. The widget also hides and disables what the current user
+> cannot do, purely so people are not offered actions that will fail.
+
+The calling user comes from the function context; their profile is resolved once per execution
+and cached. Profiles are listed via the CRM settings API.
+
+**Two guards worth building in:**
+
+- **No self-lockout.** The administrator saving the matrix cannot remove their own access to
+  Settings. The UI refuses it with a reason rather than accepting a configuration that bricks
+  the extension.
+- **Restrict only, never grant.** This matrix sits *on top of* Zoho's own module permissions. A
+  user who cannot edit Invoices in Zoho does not gain the ability by being ticked here. Stated in
+  the UI so nobody uses it as a substitute for Zoho's permission model.
+
+**Consequence:** two new scopes — `ZohoCRM.settings.profiles.READ` and `ZohoCRM.users.READ` —
+and therefore an admin re-consent on update. Worth taking now, while the extension is private.
+
+---
+
 ## Still open
 
 1. **Monthly document volume and the tier in force** (question 5 above).

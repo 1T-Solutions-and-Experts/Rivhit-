@@ -70,6 +70,14 @@ rejected field kills the whole `updateRecord` call.
 | iCredit Payment URL | `ICredit_Payment_URL` | URL |
 | iCredit Auth Number | `ICredit_Auth_Number` | Single Line |
 | iCredit Card Last4 | `ICredit_Card_Last4` | Single Line |
+| Rivhit Instalments Total | `Rivhit_Instalments_Total` | Number |
+| Rivhit Instalments Elapsed | `Rivhit_Instalments_Elapsed` | Number |
+| Rivhit Instalment Progress | `Rivhit_Instalment_Progress` | Single Line |
+| Rivhit Next Instalment Date | `Rivhit_Next_Instalment_Date` | Date |
+| Rivhit Instalment Amount | `Rivhit_Instalment_Amount` | **Currency 16,2** |
+| Rivhit Issued Snapshot | `Rivhit_Issued_Snapshot` | Multi Line (large, 32k+) |
+| Rivhit Record Drift | `Rivhit_Record_Drift` | Checkbox |
+| Rivhit Drift Detected At | `Rivhit_Drift_Detected_At` | Date/Time |
 
 ### Accounts and Contacts (both)
 `Rivhit_Customer_ID` (Number) · `Rivhit_Acc_Ref` (Single Line, 9) · `Rivhit_Tax_ID`
@@ -125,6 +133,11 @@ one). Paste the **body only** — a signature line in the body is a syntax error
 | `rv_icredit_get_url` | `crmAPIRequest` | |
 | `rv_icredit_ipn` | `crmAPIRequest` | **public**, `zapikey` |
 | `rv_icredit_ipn_failure` | `crmAPIRequest` | **public**, `zapikey`, separate URL |
+| `rv_log_change` | record argument | **Automation** category, not REST — invoked by the workflow rule in §6a |
+
+Every function that writes to Rivhit begins by resolving the calling user's profile and
+checking it against `Action_Permissions`. The widget hides what the user cannot do, but the
+function is the enforcement point — a hidden button is not access control.
 
 Every function needs a guaranteed **top-level return** — a return inside `try/catch` does not
 satisfy the compiler. Arguments arrive inside `crmAPIRequest`; check `.get("body")`,
@@ -163,9 +176,11 @@ ZohoCRM.modules.accounts.READ        ZohoCRM.modules.accounts.UPDATE
 ZohoCRM.modules.contacts.READ        ZohoCRM.modules.contacts.UPDATE
 ZohoCRM.modules.products.READ        ZohoCRM.modules.products.UPDATE
 ZohoCRM.modules.custom.ALL           # Rivhit_Receipts
-ZohoCRM.modules.notes.CREATE         # audit trail
+ZohoCRM.modules.notes.CREATE         # audit trail + drift notes
 ZohoCRM.org.variables.ALL
 ZohoCRM.settings.fields.READ
+ZohoCRM.settings.profiles.READ       # the permissions matrix
+ZohoCRM.users.READ                   # resolve the caller's profile
 ```
 
 Sales Orders are in scope because documents originate from both modules. Deals are **not** —
@@ -181,6 +196,20 @@ CRM → **Setup → Automation → Actions → Schedules → + Configure Schedul
 **activate**, then confirm the first run in the execution log.
 
 Without it, the UI copy must say payment status is **manual only**.
+
+## 6a. Workflow rule — post-issuance change notes
+
+Create on **both** Sales Orders and Invoices:
+
+- **Rule:** `Rivhit — log post-issuance changes`
+- **Trigger:** on **edit**
+- **Condition:** `Rivhit_Document_Number` **is not empty**
+- **Action:** function `rv_log_change`
+
+The condition matters — without it the rule fires on ordinary pre-issue editing and floods
+records with notes. This is deliberately a workflow rule rather than widget code: the edits worth
+catching are the ones made in the normal record view by someone not thinking about Rivhit, and
+widget code never sees those.
 
 ## 7. Rivhit-side prerequisites
 
@@ -267,6 +296,20 @@ afterwards, and the setting-vs-reality mismatch check fires when it is configure
 scheduled run · `Customer.OpenDocuments` figures match the CRM invoices · a document issued
 directly in Rivhit appears in the exceptions list · `Document.List` is always called with an
 explicit date range (it defaults to *today*).
+
+**Instalments** — a multi-payment card sale shows `1/12` and the next due date · the counter
+advances as due dates pass · `Rivhit_Payment_Status` stays `Paid` throughout · a disagreement
+between iCredit's reported payment count and Rivhit's payment rows appears as an exception.
+
+**Drift notes** — editing a line item on an issued invoice produces a Note naming the field,
+old → new, and who changed it · editing an invoice with **no** Rivhit document produces no note ·
+repeated edits append rather than overwrite · the widget banner and the AR exceptions list both
+show the drift.
+
+**Permissions** — the matrix lists the org's real profiles · a user in a disallowed profile
+sees the action hidden **and**, when the function is invoked directly, gets a refusal rather
+than a document · an admin cannot remove their own Settings access · a user who lacks Zoho edit
+rights on Invoices cannot issue even when ticked in the matrix.
 
 **Robustness** — a deliberately misconfigured CRM field produces a "saved, but field X
 skipped" warning rather than a silent failure · an HTTP 400 HTML error page from Rivhit is

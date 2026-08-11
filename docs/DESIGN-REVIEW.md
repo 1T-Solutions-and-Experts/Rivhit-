@@ -150,7 +150,12 @@ a USD document — and the iCredit page has its own configured currency set that
 explicit reason when the record's currency is not one the payment page accepts, rather than
 letting it silently charge in shekels.
 
-### S4. Card instalments versus payment status — **needs a decision**
+### S4. Card instalments versus payment status — **RESOLVED**
+
+> **Decided:** show `payment N of X`; `Rivhit_Payment_Status` stays `Paid`. The schedule is read
+> from the Rivhit document's own payment rows rather than counting IPNs (there is only one) or
+> extrapolating from the charge date. See [`DECISIONS.md` §11](DECISIONS.md).
+
 
 A 12-instalment card sale is settled with Rivhit and the customer immediately, but the cash
 arrives over a year. `Rivhit_Payment_Status = Paid` on authorisation is correct from the tax
@@ -163,7 +168,12 @@ until instalments complete — accurate on cash, but contradicts the receipt.
 Recommendation: **(a) for the payment status, with (b)'s extra field** so the AR report can show
 expected cash without lying about the document. Needs confirmation.
 
-### S5. The CRM record drifts after issuance
+### S5. The CRM record drifts after issuance — **RESOLVED**
+
+> **Decided:** no lock. A CRM Note on every post-issuance change, driven by a **workflow rule**
+> rather than widget code — the edits worth catching happen in the ordinary record view, which
+> widget code never sees. See [`DECISIONS.md` §12](DECISIONS.md).
+
 
 A Rivhit tax document is immutable. The CRM invoice it came from is not — anyone can edit line
 items afterwards, and the two silently diverge with no indication which is authoritative.
@@ -242,7 +252,13 @@ cannot be meaningfully tested there. **Fix:** after connecting the production to
 `check_only` pass over one document of each mapped role. It is free, uses the real catalog, and
 creates nothing — a production dress rehearsal with no consequences.
 
-### W6. Anyone with the button can issue a tax document — **needs a decision**
+### W6. Anyone with the button can issue a tax document — **RESOLVED**
+
+> **Decided:** a permissions matrix in Settings, populated from the org's real profiles, with
+> per-action granularity. Enforced **in the Deluge functions**, not by hiding buttons. Two guards:
+> no self-lockout, and it can only restrict — never grant beyond Zoho's own module permissions.
+> See [`DECISIONS.md` §13](DECISIONS.md).
+
 
 The design never restricts who may click Issue or Cancel. Both create legally binding, billable,
 irreversible documents.
