@@ -1,0 +1,997 @@
+// ════════════════════════════════════════════════════════════════════════════
+//  rv_issue_document  —  V1.0-r1  —  BILLABLE
+//  PASTE BODY ONLY. Category: REST API. Return: STRING. Argument: crmAPIRequest.
+//
+//  The write sequence, in order, and none of it is optional:
+//    1. permission check          (the widget hiding a button is not a control)
+//    2. local validation          (totals, currency uniformity, field lengths)
+//    3. check_only dry run        FREE, creates nothing
+//    4. persist request_reference BEFORE the real call, so a lost tab is recoverable
+//    5. real call                 with request_reference + prevent_duplicates
+//    6. ambiguous failure         → tell the caller to recover, NEVER retry here
+//
+//  CRITICAL (design review C1): the dry run is sent WITHOUT request_reference and
+//  WITHOUT prevent_duplicates. If Rivhit registered the key during validation the
+//  real call would be refused as a duplicate and no document would ever exist.
+// ════════════════════════════════════════════════════════════════════════════
+
+prefix = "rivhitzohocrmextension__";
+out = Map();
+out.put("ok",false);
+out.put("code","init");
+out.put("message","");
+
+// ── 1. Arguments ────────────────────────────────────────────────────────────
+argsMap = Map();
+reqBody = crmAPIRequest.get("body");
+if(reqBody != null && reqBody.toString() != "" && reqBody.toString() != "null")
+{
+	try
+	{
+		cand = reqBody.toString().toMap();
+		if(cand.get("arguments") != null)
+		{
+			argsMap = cand.get("arguments").toString().toMap();
+		}
+		else
+		{
+			argsMap = cand;
+		}
+	}
+	catch (e)
+	{
+		argsMap = Map();
+	}
+}
+if(argsMap.get("recordId") == null)
+{
+	pr = crmAPIRequest.get("params");
+	if(pr != null)
+	{
+		try
+		{
+			pm = pr.toString().toMap();
+			if(pm.get("arguments") != null)
+			{
+				argsMap = pm.get("arguments").toString().toMap();
+			}
+			else
+			{
+				argsMap = pm;
+			}
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+if(argsMap.get("recordId") == null)
+{
+	ra = crmAPIRequest.get("arguments");
+	if(ra != null && ra.toString() != "")
+	{
+		try
+		{
+			argsMap = ra.toString().toMap();
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+moduleName = ifnull(argsMap.get("module"),"Invoices").toString();
+recordId = ifnull(argsMap.get("recordId"),"").toString();
+docType = ifnull(argsMap.get("documentType"),0).toLong();
+currencyId = ifnull(argsMap.get("currencyId"),1).toLong();
+exchangeRate = ifnull(argsMap.get("exchangeRate"),0).toDecimal();
+updateStock = ifnull(argsMap.get("updateStock"),true);
+rejectShort = ifnull(argsMap.get("rejectOutOfStock"),false);
+closeSrcType = ifnull(argsMap.get("closeSourceType"),0).toLong();
+closeSrcNum = ifnull(argsMap.get("closeSourceNumber"),0).toLong();
+vatExempt = ifnull(argsMap.get("vatExempt"),false);
+sendMail = ifnull(argsMap.get("sendMail"),false);
+emailTo = ifnull(argsMap.get("emailTo"),"").toString();
+comments = ifnull(argsMap.get("comments"),"").toString();
+dueDate = ifnull(argsMap.get("dueDate"),"").toString();
+payMethodCode = ifnull(argsMap.get("paymentType"),0).toLong();
+payDetails = ifnull(argsMap.get("paymentDetails"),Map());
+dryRunOnly = ifnull(argsMap.get("dryRunOnly"),false);
+reissue = ifnull(argsMap.get("reissue"),false);
+if(recordId == "" || docType == 0)
+{
+	out.put("code","bad_request");
+	out.put("message","חסר מזהה רשומה או סוג מסמך");
+	return out.toString();
+}
+
+// ── 2. Settings ─────────────────────────────────────────────────────────────
+apiToken = ifnull(zoho.crm.getOrgVariable(prefix + "API_Token"),"").toString();
+if(apiToken == "")
+{
+	out.put("code","not_configured");
+	out.put("message","ההרחבה טרם הוגדרה — חסר API Token");
+	return out.toString();
+}
+baseUrl = "https://api.rivhit.co.il/online/RivhitOnlineAPI.svc/";
+sortVat = ifnull(zoho.crm.getOrgVariable(prefix + "Sort_Code_VAT"),"100").toLong();
+sortExempt = ifnull(zoho.crm.getOrgVariable(prefix + "Sort_Code_Exempt"),"150").toLong();
+defLang = ifnull(zoho.crm.getOrgVariable(prefix + "Default_Language"),"he").toString();
+digitalSig = ifnull(zoho.crm.getOrgVariable(prefix + "Digital_Signature"),"false").toString() == "true";
+confirmReq = ifnull(zoho.crm.getOrgVariable(prefix + "Confirmation_Required"),"false").toString() == "true";
+typeCacheRaw = ifnull(zoho.crm.getOrgVariable(prefix + "Type_Cache"),"").toString();
+permsRaw = ifnull(zoho.crm.getOrgVariable(prefix + "Action_Permissions"),"").toString();
+
+// ── 3. Permission — enforced HERE, not in the widget ───────────────────────
+allowed = true;
+if(permsRaw != "")
+{
+	try
+	{
+		perms = permsRaw.toMap();
+		allowList = ifnull(perms.get("issueDocument"),List());
+		if(allowList.size() > 0)
+		{
+			allowed = false;
+			me = zoho.crm.getRecordById("users",zoho.loginuserid);
+			myProf = ifnull(me.get("profile"),Map());
+			myId = ifnull(myProf.get("id"),"").toString();
+			myName = ifnull(myProf.get("name"),"").toString();
+			for each  p in allowList
+			{
+				if(p.toString() == myId || p.toString() == myName)
+				{
+					allowed = true;
+				}
+			}
+		}
+	}
+	catch (pe)
+	{
+		allowed = true;
+	}
+}
+if(!allowed)
+{
+	out.put("code","forbidden");
+	out.put("message","אין לך הרשאה להפיק מסמכים");
+	return out.toString();
+}
+
+// ── 4. Type flags from the cached catalog (never hardcoded) ────────────────
+isInvoiceReceipt = false;
+typePriceIncVat = true;
+isAccounting = true;
+typeLabel = "" + docType;
+if(typeCacheRaw != "")
+{
+	try
+	{
+		tc = typeCacheRaw.toMap();
+		for each  dt in ifnull(tc.get("documentTypes"),List())
+		{
+			if(ifnull(dt.get("document_type"),0).toLong() == docType)
+			{
+				isInvoiceReceipt = ifnull(dt.get("is_invoice_receipt"),false);
+				typePriceIncVat = ifnull(dt.get("price_include_vat"),true);
+				isAccounting = ifnull(dt.get("is_accounting"),true);
+				typeLabel = ifnull(dt.get("document_name"),typeLabel).toString();
+			}
+		}
+	}
+	catch (te)
+	{
+		isInvoiceReceipt = false;
+	}
+}
+if(isInvoiceReceipt && payMethodCode == 0)
+{
+	out.put("code","payment_required");
+	out.put("message","סוג המסמך '" + typeLabel + "' הוא חשבונית מס קבלה ודורש אמצעי תשלום");
+	return out.toString();
+}
+
+// ── 5. Read the CRM record ─────────────────────────────────────────────────
+rec = Map();
+try
+{
+	rec = zoho.crm.getRecordById(moduleName,recordId.toLong());
+}
+catch (re)
+{
+	rec = Map();
+}
+if(rec.isEmpty() || rec.get("id") == null)
+{
+	out.put("code","record_not_found");
+	out.put("message","הרשומה לא נמצאה");
+	return out.toString();
+}
+
+// Resolve namespaced vs plain field names against the record's own keys.
+fDocNum = "Rivhit_Document_Number";
+fDocType = "Rivhit_Document_Type";
+fDocId = "Rivhit_Document_Identity";
+fDocUrl = "Rivhit_Document_URL";
+fReqRef = "Rivhit_Request_Reference";
+fStatus = "Rivhit_Payment_Status";
+fPaid = "Rivhit_Paid_Amount";
+fPaidDate = "Rivhit_Paid_Date";
+fIssue = "Rivhit_Issue_Date";
+fDue = "Rivhit_Due_Date";
+fConfNum = "Rivhit_Confirmation_Number";
+fConfSt = "Rivhit_Confirmation_Status";
+fCur = "Rivhit_Currency_ID";
+fRate = "Rivhit_Exchange_Rate";
+fStock = "Rivhit_Stock_Updated";
+fClosedNum = "Rivhit_Closed_Document_Number";
+fSnap = "Rivhit_Issued_Snapshot";
+fDrift = "Rivhit_Record_Drift";
+fSync = "Rivhit_Last_Sync";
+fIsClosed = "Rivhit_Is_Closed";
+for each  k in rec.keys()
+{
+	ks = k.toString();
+	if(ks.endsWith("Rivhit_Document_Number"))
+	{
+		fDocNum = ks;
+	}
+	else if(ks.endsWith("Rivhit_Document_Type"))
+	{
+		fDocType = ks;
+	}
+	else if(ks.endsWith("Rivhit_Document_Identity"))
+	{
+		fDocId = ks;
+	}
+	else if(ks.endsWith("Rivhit_Document_URL"))
+	{
+		fDocUrl = ks;
+	}
+	else if(ks.endsWith("Rivhit_Request_Reference"))
+	{
+		fReqRef = ks;
+	}
+	else if(ks.endsWith("Rivhit_Payment_Status"))
+	{
+		fStatus = ks;
+	}
+	else if(ks.endsWith("Rivhit_Paid_Amount"))
+	{
+		fPaid = ks;
+	}
+	else if(ks.endsWith("Rivhit_Paid_Date"))
+	{
+		fPaidDate = ks;
+	}
+	else if(ks.endsWith("Rivhit_Issue_Date"))
+	{
+		fIssue = ks;
+	}
+	else if(ks.endsWith("Rivhit_Due_Date"))
+	{
+		fDue = ks;
+	}
+	else if(ks.endsWith("Rivhit_Confirmation_Number"))
+	{
+		fConfNum = ks;
+	}
+	else if(ks.endsWith("Rivhit_Confirmation_Status"))
+	{
+		fConfSt = ks;
+	}
+	else if(ks.endsWith("Rivhit_Currency_ID"))
+	{
+		fCur = ks;
+	}
+	else if(ks.endsWith("Rivhit_Exchange_Rate"))
+	{
+		fRate = ks;
+	}
+	else if(ks.endsWith("Rivhit_Stock_Updated"))
+	{
+		fStock = ks;
+	}
+	else if(ks.endsWith("Rivhit_Closed_Document_Number"))
+	{
+		fClosedNum = ks;
+	}
+	else if(ks.endsWith("Rivhit_Issued_Snapshot"))
+	{
+		fSnap = ks;
+	}
+	else if(ks.endsWith("Rivhit_Record_Drift"))
+	{
+		fDrift = ks;
+	}
+	else if(ks.endsWith("Rivhit_Last_Sync"))
+	{
+		fSync = ks;
+	}
+	else if(ks.endsWith("Rivhit_Is_Closed"))
+	{
+		fIsClosed = ks;
+	}
+}
+existingDocNum = ifnull(rec.get(fDocNum),0).toLong();
+if(existingDocNum > 0 && !reissue)
+{
+	out.put("code","already_issued");
+	out.put("message","כבר הופק מסמך עבור רשומה זו (מספר " + existingDocNum + ")");
+	d0 = Map();
+	d0.put("documentNumber",existingDocNum);
+	d0.put("documentType",ifnull(rec.get(fDocType),0));
+	out.put("data",d0);
+	return out.toString();
+}
+
+// ── 6. Customer. Rivhit can match and create inline during Document.New, so
+//       one call does what would otherwise be three. ───────────────────────
+custId = 0;
+custEmail = "";
+custName = "";
+custFirst = "";
+custTaxId = "";
+custPhone = "";
+custAddress = "";
+custCity = "";
+custZip = 0;
+accRef = "";
+acct = ifnull(rec.get("Account_Name"),Map());
+contact = ifnull(rec.get("Contact_Name"),Map());
+billTo = acct;
+billModule = "Accounts";
+if(billTo.isEmpty() || billTo.get("id") == null)
+{
+	billTo = contact;
+	billModule = "Contacts";
+}
+billRec = Map();
+if(!billTo.isEmpty() && billTo.get("id") != null)
+{
+	try
+	{
+		billRec = zoho.crm.getRecordById(billModule,billTo.get("id").toLong());
+	}
+	catch (be)
+	{
+		billRec = Map();
+	}
+}
+if(!billRec.isEmpty())
+{
+	for each  bk in billRec.keys()
+	{
+		bks = bk.toString();
+		if(bks.endsWith("Rivhit_Customer_ID"))
+		{
+			custId = ifnull(billRec.get(bk),0).toLong();
+		}
+		else if(bks.endsWith("Rivhit_Acc_Ref"))
+		{
+			accRef = ifnull(billRec.get(bk),"").toString();
+		}
+		else if(bks.endsWith("Rivhit_Tax_ID"))
+		{
+			custTaxId = ifnull(billRec.get(bk),"").toString();
+		}
+	}
+	custEmail = ifnull(billRec.get("Email"),"").toString();
+	custName = ifnull(billRec.get("Account_Name"),ifnull(billRec.get("Last_Name"),"")).toString();
+	custFirst = ifnull(billRec.get("First_Name"),"").toString();
+	custPhone = ifnull(billRec.get("Phone"),"").toString();
+	custAddress = ifnull(billRec.get("Billing_Street"),ifnull(billRec.get("Mailing_Street"),"")).toString();
+	custCity = ifnull(billRec.get("Billing_City"),ifnull(billRec.get("Mailing_City"),"")).toString();
+	zipRaw = ifnull(billRec.get("Billing_Code"),ifnull(billRec.get("Mailing_Zip"),"")).toString();
+	try
+	{
+		custZip = zipRaw.replaceAll("[^0-9]","").toLong();
+	}
+	catch (ze)
+	{
+		custZip = 0;
+	}
+}
+if(custName == "")
+{
+	custName = ifnull(rec.get("Subject"),"לקוח").toString();
+}
+if(emailTo == "")
+{
+	emailTo = custEmail;
+}
+// Rivhit field length limits — truncate, do not let the API reject the document.
+if(custName.length() > 30)
+{
+	custName = custName.subString(0,30);
+}
+if(custFirst.length() > 20)
+{
+	custFirst = custFirst.subString(0,20);
+}
+if(custAddress.length() > 30)
+{
+	custAddress = custAddress.subString(0,30);
+}
+if(custCity.length() > 20)
+{
+	custCity = custCity.subString(0,20);
+}
+if(custPhone.length() > 15)
+{
+	custPhone = custPhone.subString(0,15);
+}
+if(comments.length() > 400)
+{
+	comments = comments.subString(0,400);
+}
+
+// ── 7. Line items. Gross prices with price_include_vat:true, so the items
+//       total and the payments total agree by construction. ───────────────
+lines = ifnull(rec.get("Product_Details"),List());
+if(lines.size() == 0)
+{
+	out.put("code","no_lines");
+	out.put("message","אין שורות פריטים ברשומה");
+	return out.toString();
+}
+items = List();
+itemsTotal = 0.0;
+lineIndex = 0;
+for each  ln in lines
+{
+	lineIndex = lineIndex + 1;
+	prod = ifnull(ln.get("product"),Map());
+	qty = ifnull(ln.get("quantity"),1).toDecimal();
+	if(qty == 0)
+	{
+		qty = 1;
+	}
+	listPrice = ifnull(ln.get("list_price"),0).toDecimal();
+	lineDisc = ifnull(ln.get("Discount"),0).toDecimal();
+	gross = listPrice * qty;
+	netAfterDisc = gross - lineDisc;
+	unitAfter = netAfterDisc / qty;
+	desc = ifnull(ln.get("product_description"),"").toString();
+	if(desc == "")
+	{
+		desc = ifnull(prod.get("name"),"פריט").toString();
+	}
+	if(desc.length() > 100)
+	{
+		desc = desc.subString(0,100);
+	}
+	catalog = ifnull(prod.get("Product_Code"),"").toString();
+	if(catalog.length() > 15)
+	{
+		catalog = catalog.subString(0,15);
+	}
+	it = Map();
+	it.put("item_id",0);
+	if(catalog != "")
+	{
+		it.put("catalog_number",catalog);
+	}
+	it.put("quantity",qty);
+	it.put("description",desc);
+	// Rounding happens on the LINE TOTAL, not the unit price: a fractional
+	// quantity times a 2dp unit price does not land on 2dp.
+	lineTotal = netAfterDisc.round(2);
+	unitRounded = (lineTotal / qty).round(4);
+	if(currencyId == 1)
+	{
+		it.put("price_nis",unitRounded);
+		if(lineDisc > 0)
+		{
+			it.put("bruto_price_nis",listPrice.round(4));
+		}
+	}
+	else
+	{
+		it.put("price_mtc",unitRounded);
+		it.put("currency_id",currencyId);
+	}
+	items.add(it);
+	itemsTotal = itemsTotal + lineTotal;
+}
+itemsTotal = itemsTotal.round(2);
+
+// ── 8. Local validation before anything leaves the building ────────────────
+if(itemsTotal <= 0)
+{
+	out.put("code","zero_total");
+	out.put("message","סכום המסמך חייב להיות גדול מאפס");
+	return out.toString();
+}
+if(currencyId != 1 && exchangeRate <= 0)
+{
+	out.put("code","missing_rate");
+	out.put("message","מסמך במטבע חוץ מחייב שער חליפין");
+	return out.toString();
+}
+
+// ── 9. Build the payload ───────────────────────────────────────────────────
+payload = Map();
+payload.put("api_token",apiToken);
+payload.put("document_type",docType);
+payload.put("customer_id",custId);
+payload.put("items",items);
+payload.put("price_include_vat",true);
+payload.put("sort_code",if(vatExempt,sortExempt,sortVat));
+payload.put("currency_id",currencyId);
+if(currencyId != 1)
+{
+	payload.put("exchange_rate",exchangeRate);
+}
+payload.put("language",defLang);
+payload.put("send_mail",sendMail);
+if(digitalSig)
+{
+	payload.put("digital_signature",true);
+}
+if(emailTo != "" && sendMail)
+{
+	payload.put("email_to",emailTo);
+}
+if(comments != "")
+{
+	payload.put("comments",comments);
+}
+if(dueDate != "")
+{
+	payload.put("due_date",dueDate);
+}
+if(!updateStock)
+{
+	payload.put("no_update_inventory",true);
+}
+if(rejectShort)
+{
+	payload.put("reject_item_quantity",true);
+}
+if(closeSrcType > 0 && closeSrcNum > 0)
+{
+	payload.put("closed_document_type",closeSrcType);
+	payload.put("closed_document_number",closeSrcNum);
+	payload.put("document_is_receipt",false);
+}
+// Inline customer matching — Rivhit resolves or creates in the same call.
+if(custId == 0)
+{
+	payload.put("create_customer",true);
+	payload.put("last_name",custName);
+	if(custFirst != "")
+	{
+		payload.put("first_name",custFirst);
+	}
+	if(custAddress != "")
+	{
+		payload.put("address",custAddress);
+	}
+	if(custCity != "")
+	{
+		payload.put("city",custCity);
+	}
+	if(custZip > 0)
+	{
+		payload.put("zipcode",custZip);
+	}
+	if(custPhone != "")
+	{
+		payload.put("phone",custPhone);
+		payload.put("find_by_phone",true);
+	}
+	if(accRef != "")
+	{
+		payload.put("acc_ref",accRef);
+		payload.put("find_by_acc_ref",true);
+	}
+	if(custTaxId != "")
+	{
+		try
+		{
+			payload.put("id_number",custTaxId.replaceAll("[^0-9]","").toLong());
+			payload.put("find_by_id",true);
+		}
+		catch (ie)
+		{
+			payload.put("validate_id",false);
+		}
+	}
+	if(custEmail != "")
+	{
+		payload.put("email_to",custEmail);
+		payload.put("find_by_mail",true);
+	}
+}
+// Reference (אסמכתא) doubles as a secondary recovery key — the document becomes
+// findable via Document.List + filter_fields if Status.LastRequest ever fails us.
+refNum = 0;
+try
+{
+	refNum = recordId.right(9).toLong();
+}
+catch (rfe)
+{
+	refNum = 0;
+}
+if(refNum > 0)
+{
+	payload.put("reference",refNum);
+}
+// Payments — only for types Rivhit flags as invoice-receipt.
+if(isInvoiceReceipt)
+{
+	pay = Map();
+	pay.put("payment_type",payMethodCode);
+	if(currencyId == 1)
+	{
+		pay.put("amount_nis",itemsTotal);
+	}
+	else
+	{
+		pay.put("amount_mtc",itemsTotal);
+	}
+	for each  pk in payDetails.keys()
+	{
+		pay.put(pk,payDetails.get(pk));
+	}
+	pays = List();
+	pays.add(pay);
+	payload.put("payments",pays);
+}
+
+// ── 10. DRY RUN — free, creates nothing. Deliberately WITHOUT the idempotency
+//        key: registering it here could make the real call a "duplicate". ───
+dryPayload = payload;
+dryPayload.put("check_only",true);
+dryOk = false;
+dryMsg = "";
+try
+{
+	dr = invokeurl
+	[
+		url :baseUrl + "Document.New"
+		type :POST
+		parameters :dryPayload.toString()
+		headers :{"Content-Type":"application/json"}
+	];
+	dec = -9999;
+	try
+	{
+		dec = ifnull(dr.get("error_code"),-9999).toLong();
+	}
+	catch (dpe)
+	{
+		dec = -9999;
+	}
+	if(dec == 0)
+	{
+		dryOk = true;
+	}
+	else if(dec == -9999)
+	{
+		dryMsg = "תשובה לא קריאה מרווחית בשלב הבדיקה";
+	}
+	else
+	{
+		dryMsg = ifnull(dr.get("client_message"),"הבדיקה נכשלה").toString();
+		info "rv_issue_document dry-run debug: " + ifnull(dr.get("debug_message"),"").toString();
+	}
+}
+catch (de)
+{
+	dryMsg = "שגיאת תקשורת בשלב הבדיקה";
+	info "rv_issue_document dry-run transport: " + de.toString();
+}
+if(!dryOk)
+{
+	out.put("code","validation_failed");
+	out.put("message",dryMsg);
+	dd = Map();
+	dd.put("itemsTotal",itemsTotal);
+	dd.put("documentType",docType);
+	out.put("data",dd);
+	return out.toString();
+}
+if(dryRunOnly)
+{
+	out.put("ok",true);
+	out.put("code","dry_run_ok");
+	out.put("message","הבדיקה עברה — המסמך תקין להפקה");
+	dd2 = Map();
+	dd2.put("itemsTotal",itemsTotal);
+	dd2.put("documentType",docType);
+	dd2.put("typeName",typeLabel);
+	dd2.put("isInvoiceReceipt",isInvoiceReceipt);
+	out.put("data",dd2);
+	return out.toString();
+}
+
+// ── 11. Idempotency key, persisted BEFORE the call ─────────────────────────
+revision = 1;
+existingRef = ifnull(rec.get(fReqRef),"").toString();
+if(reissue && existingRef != "")
+{
+	try
+	{
+		refParts = existingRef.toList(":");
+		revision = refParts.get(refParts.size() - 1).toLong() + 1;
+	}
+	catch (rve)
+	{
+		revision = 2;
+	}
+}
+reqRef = "zcrm:" + moduleName + ":" + recordId + ":doc:" + revision;
+preUpd = Map();
+preUpd.put(fReqRef,reqRef);
+try
+{
+	zoho.crm.updateRecord(moduleName,recordId.toLong(),preUpd);
+}
+catch (pue)
+{
+	info "rv_issue_document: could not persist request_reference before the call: " + pue.toString();
+}
+
+// ── 12. The real call ──────────────────────────────────────────────────────
+realPayload = payload;
+realPayload.remove("check_only");
+realPayload.put("request_reference",reqRef);
+realPayload.put("prevent_duplicates",true);
+issued = false;
+ambiguous = false;
+errMsg = "";
+errCode = "";
+docNumber = 0;
+docIdentity = "";
+docLink = "";
+docAmount = 0.0;
+confNumber = "";
+returnedCustomer = 0;
+try
+{
+	rr = invokeurl
+	[
+		url :baseUrl + "Document.New"
+		type :POST
+		parameters :realPayload.toString()
+		headers :{"Content-Type":"application/json"}
+	];
+	ec = -9999;
+	try
+	{
+		ec = ifnull(rr.get("error_code"),-9999).toLong();
+	}
+	catch (rpe)
+	{
+		ec = -9999;
+	}
+	if(ec == -9999)
+	{
+		ambiguous = true;
+		errMsg = "תשובה לא קריאה מרווחית — יש לבצע שחזור";
+		errCode = "ambiguous_unparseable";
+	}
+	else if(ec == 0)
+	{
+		issued = true;
+		dat = ifnull(rr.get("data"),Map());
+		docNumber = ifnull(dat.get("document_number"),0).toLong();
+		docIdentity = ifnull(dat.get("document_identity"),"").toString();
+		docLink = ifnull(dat.get("document_link"),"").toString();
+		docAmount = ifnull(dat.get("amount"),itemsTotal).toDecimal();
+		confNumber = ifnull(dat.get("confirmation_number"),"").toString();
+		returnedCustomer = ifnull(dat.get("customer_id"),0).toLong();
+	}
+	else
+	{
+		// A business validation failure is deterministic and created nothing.
+		errMsg = ifnull(rr.get("client_message"),"ההפקה נכשלה").toString();
+		errCode = "rivhit_" + ec;
+		info "rv_issue_document debug: " + ifnull(rr.get("debug_message"),"").toString();
+	}
+}
+catch (ie2)
+{
+	ambiguous = true;
+	errMsg = "שגיאת תקשורת — לא ידוע אם המסמך נוצר. יש לבצע שחזור.";
+	errCode = "ambiguous_transport";
+	info "rv_issue_document transport: " + ie2.toString();
+}
+if(ambiguous)
+{
+	out.put("code",errCode);
+	out.put("message",errMsg);
+	da = Map();
+	da.put("requestReference",reqRef);
+	da.put("recoverable",true);
+	out.put("data",da);
+	return out.toString();
+}
+if(!issued)
+{
+	out.put("code",errCode);
+	out.put("message",errMsg);
+	db = Map();
+	db.put("requestReference",reqRef);
+	db.put("recoverable",false);
+	out.put("data",db);
+	return out.toString();
+}
+
+// ── 13. Persist. Critical fields first; timestamps separately, because one
+//        rejected field kills the whole update. ───────────────────────────
+confStatus = "Not Required";
+if(confirmReq && isAccounting)
+{
+	if(confNumber != "" && confNumber != "0")
+	{
+		confStatus = "Obtained";
+	}
+	else
+	{
+		confStatus = "Missing";
+	}
+}
+snapshot = Map();
+snapshot.put("total",itemsTotal);
+snapshot.put("currency",currencyId);
+snapshot.put("lineCount",items.size());
+snapshot.put("customer",custName);
+snapshot.put("items",items);
+snapshot.put("issuedAt",zoho.currenttime.toString("yyyy-MM-dd'T'HH:mm:ssZ"));
+snapText = snapshot.toString();
+if(snapText.length() > 30000)
+{
+	shortSnap = Map();
+	shortSnap.put("total",itemsTotal);
+	shortSnap.put("currency",currencyId);
+	shortSnap.put("lineCount",items.size());
+	shortSnap.put("truncated",true);
+	snapText = shortSnap.toString();
+}
+upd = Map();
+upd.put(fDocNum,docNumber);
+upd.put(fDocType,docType);
+upd.put(fDocId,docIdentity);
+upd.put(fDocUrl,docLink);
+upd.put(fCur,currencyId);
+upd.put(fStock,updateStock);
+upd.put(fIssue,zoho.currentdate.toString("yyyy-MM-dd"));
+upd.put(fStatus,if(isInvoiceReceipt,"Paid","Issued"));
+if(isInvoiceReceipt)
+{
+	upd.put(fPaid,itemsTotal);
+	upd.put(fPaidDate,zoho.currentdate.toString("yyyy-MM-dd"));
+	upd.put(fIsClosed,true);
+}
+else
+{
+	upd.put(fPaid,0);
+	upd.put(fIsClosed,false);
+}
+if(confNumber != "" && confNumber != "0")
+{
+	upd.put(fConfNum,confNumber);
+}
+upd.put(fConfSt,confStatus);
+if(closeSrcNum > 0)
+{
+	upd.put(fClosedNum,closeSrcNum);
+}
+upd.put(fDrift,false);
+updResp = "";
+try
+{
+	updResp = zoho.crm.updateRecord(moduleName,recordId.toLong(),upd).toString();
+}
+catch (ue2)
+{
+	updResp = "ERROR " + ue2.toString();
+	info "rv_issue_document: critical CRM update failed: " + ue2.toString();
+}
+// Best-effort extras in a separate call so a rejected field cannot undo the above.
+try
+{
+	upd2 = Map();
+	upd2.put(fSync,zoho.currenttime);
+	upd2.put(fSnap,snapText);
+	if(currencyId != 1)
+	{
+		upd2.put(fRate,exchangeRate);
+	}
+	zoho.crm.updateRecord(moduleName,recordId.toLong(),upd2);
+}
+catch (ue3)
+{
+	info "rv_issue_document: optional fields skipped: " + ue3.toString();
+}
+// Back-fill the Rivhit customer id onto the Account/Contact.
+if(returnedCustomer > 0 && custId == 0 && !billRec.isEmpty())
+{
+	try
+	{
+		cu = Map();
+		for each  bk2 in billRec.keys()
+		{
+			if(bk2.toString().endsWith("Rivhit_Customer_ID"))
+			{
+				cu.put(bk2.toString(),returnedCustomer);
+			}
+		}
+		if(!cu.isEmpty())
+		{
+			zoho.crm.updateRecord(billModule,billTo.get("id").toLong(),cu);
+		}
+	}
+	catch (ce2)
+	{
+		info "rv_issue_document: customer back-fill skipped: " + ce2.toString();
+	}
+}
+
+// ── 14. Audit note ─────────────────────────────────────────────────────────
+try
+{
+	noteBody = "הופק מסמך ברווחית" + "\n" + "סוג: " + typeLabel + " (" + docType + ")" + "\n" + "מספר: " + docNumber + "\n" + "סכום: " + itemsTotal + "\n" + "מספר הקצאה: " + if(confNumber == "","—",confNumber) + "\n" + "מפתח ייחודיות: " + reqRef + "\n" + "עדכון מלאי: " + if(updateStock,"כן","לא");
+	if(closeSrcNum > 0)
+	{
+		noteBody = noteBody + "\n" + "סגר מסמך: " + closeSrcType + "/" + closeSrcNum;
+	}
+	nt = Map();
+	nt.put("Note_Title","רווחית — הפקת מסמך " + docNumber);
+	nt.put("Note_Content",noteBody);
+	nt.put("Parent_Id",recordId);
+	nt.put("se_module",moduleName);
+	zoho.crm.createRecord("Notes",nt);
+}
+catch (ne)
+{
+	info "rv_issue_document: note skipped: " + ne.toString();
+}
+
+// ── 15. Usage counter ──────────────────────────────────────────────────────
+try
+{
+	usageRaw = ifnull(zoho.crm.getOrgVariable(prefix + "Usage_Counter"),"").toString();
+	usage = Map();
+	if(usageRaw != "")
+	{
+		usage = usageRaw.toMap();
+	}
+	thisMonth = zoho.currentdate.toString("yyyy-MM");
+	cnt = 0;
+	if(ifnull(usage.get("month"),"").toString() == thisMonth)
+	{
+		cnt = ifnull(usage.get("count"),0).toLong();
+	}
+	usage.put("month",thisMonth);
+	usage.put("count",cnt + 1);
+	zoho.crm.invokeConnector("crm.set",{"apiname":prefix + "Usage_Counter","value":usage.toString()});
+}
+catch (qe)
+{
+	info "rv_issue_document: usage counter skipped: " + qe.toString();
+}
+
+// ── 16. Done ───────────────────────────────────────────────────────────────
+d = Map();
+d.put("documentType",docType);
+d.put("typeName",typeLabel);
+d.put("documentNumber",docNumber);
+d.put("documentIdentity",docIdentity);
+d.put("documentUrl",docLink);
+d.put("amount",docAmount);
+d.put("confirmationNumber",confNumber);
+d.put("confirmationStatus",confStatus);
+d.put("customerId",returnedCustomer);
+d.put("requestReference",reqRef);
+d.put("crmUpdate",updResp);
+out.put("ok",true);
+out.put("code","issued");
+out.put("message","המסמך הופק בהצלחה");
+out.put("data",d);
+return out.toString();

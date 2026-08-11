@@ -1,0 +1,167 @@
+{
+  "app_name": "RivhitBridge",
+  "app_version": "1.0",
+  "sdkversion": "2.0",
+  "type": "crm",
+  "platform": "crm",
+  "locale": ["he", "en"],
+  "ui": {
+    "widgets": [
+      {
+        "widgetType": "widget",
+        "apiName": "rv_settings_widget",
+        "displayName": "הגדרות רווחית",
+        "module": "Settings",
+        "type": "settings",
+        "url": "app/widgets/settings/index.html",
+        "dimensions": { "width": "980", "height": "900" }
+      },
+      {
+        "widgetType": "widget",
+        "apiName": "rv_issue_invoice_widget",
+        "displayName": "הפקת מסמך ברווחית",
+        "module": "Invoices",
+        "type": "button",
+        "url": "app/widgets/issue_document/index.html",
+        "dimensions": { "width": "720", "height": "820" }
+      },
+      {
+        "widgetType": "widget",
+        "apiName": "rv_issue_so_widget",
+        "displayName": "הפקת מסמך ברווחית",
+        "module": "Sales_Orders",
+        "type": "button",
+        "url": "app/widgets/issue_document/index.html",
+        "dimensions": { "width": "720", "height": "820" }
+      },
+      {
+        "widgetType": "widget",
+        "apiName": "rv_receipt_invoice_widget",
+        "displayName": "רישום תשלום / קבלה",
+        "module": "Invoices",
+        "type": "button",
+        "url": "app/widgets/record_payment/index.html",
+        "dimensions": { "width": "620", "height": "760" }
+      },
+      {
+        "widgetType": "widget",
+        "apiName": "rv_receipt_so_widget",
+        "displayName": "רישום תשלום / קבלה",
+        "module": "Sales_Orders",
+        "type": "button",
+        "url": "app/widgets/record_payment/index.html",
+        "dimensions": { "width": "620", "height": "760" }
+      },
+      {
+        "widgetType": "widget",
+        "apiName": "rv_paylink_invoice_widget",
+        "displayName": "קישור לתשלום (iCredit)",
+        "module": "Invoices",
+        "type": "button",
+        "url": "app/widgets/payment_link/index.html",
+        "dimensions": { "width": "620", "height": "640" }
+      },
+      {
+        "widgetType": "widget",
+        "apiName": "rv_paylink_so_widget",
+        "displayName": "קישור לתשלום (iCredit)",
+        "module": "Sales_Orders",
+        "type": "button",
+        "url": "app/widgets/payment_link/index.html",
+        "dimensions": { "width": "620", "height": "640" }
+      },
+      {
+        "widgetType": "widget",
+        "apiName": "rv_refresh_invoice_widget",
+        "displayName": "רענון סטטוס מרווחית",
+        "module": "Invoices",
+        "type": "button",
+        "url": "app/widgets/refresh_status/index.html",
+        "dimensions": { "width": "560", "height": "560" }
+      },
+      {
+        "widgetType": "widget",
+        "apiName": "rv_refresh_so_widget",
+        "displayName": "רענון סטטוס מרווחית",
+        "module": "Sales_Orders",
+        "type": "button",
+        "url": "app/widgets/refresh_status/index.html",
+        "dimensions": { "width": "560", "height": "560" }
+      },
+      {
+        "widgetType": "widget",
+        "apiName": "rv_cancel_invoice_widget",
+        "displayName": "ביטול מסמך ברווחית",
+        "module": "Invoices",
+        "type": "button",
+        "url": "app/widgets/cancel_document/index.html",
+        "dimensions": { "width": "620", "height": "680" }
+      },
+      {
+        "widgetType": "widget",
+        "apiName": "rv_cancel_so_widget",
+        "displayName": "ביטול מסמך ברווחית",
+        "module": "Sales_Orders",
+        "type": "button",
+        "url": "app/widgets/cancel_document/index.html",
+        "dimensions": { "width": "620", "height": "680" }
+      },
+      {
+        "widgetType": "widget",
+        "apiName": "rv_customer_sync_accounts",
+        "displayName": "סנכרון לקוחות לרווחית",
+        "module": "Accounts",
+        "type": "massaction",
+        "url": "app/widgets/customer_sync/index.html",
+        "dimensions": { "width": "760", "height": "660" }
+      },
+      {
+        "widgetType": "widget",
+        "apiName": "rv_customer_sync_contacts",
+        "displayName": "סנכרון אנשי קשר לרווחית",
+        "module": "Contacts",
+        "type": "massaction",
+        "url": "app/widgets/customer_sync/index.html",
+        "dimensions": { "width": "760", "height": "660" }
+      },
+      {
+        "widgetType": "widget",
+        "apiName": "rv_product_sync_widget",
+        "displayName": "סנכרון פריטים לרווחית",
+        "module": "Products",
+        "type": "massaction",
+        "url": "app/widgets/product_sync/index.html",
+        "dimensions": { "width": "760", "height": "660" }
+      },
+      {
+        "widgetType": "widget",
+        "apiName": "rv_ar_report_widget",
+        "displayName": "דוח גיול חובות",
+        "module": "Invoices",
+        "type": "massaction",
+        "url": "app/widgets/ar_report/index.html",
+        "dimensions": { "width": "1180", "height": "800" }
+      }
+    ]
+  },
+  "connectedapp": {
+    "permissions": [
+      "ZohoCRM.modules.invoices.READ",
+      "ZohoCRM.modules.invoices.UPDATE",
+      "ZohoCRM.modules.salesorders.READ",
+      "ZohoCRM.modules.salesorders.UPDATE",
+      "ZohoCRM.modules.accounts.READ",
+      "ZohoCRM.modules.accounts.UPDATE",
+      "ZohoCRM.modules.contacts.READ",
+      "ZohoCRM.modules.contacts.UPDATE",
+      "ZohoCRM.modules.products.READ",
+      "ZohoCRM.modules.products.UPDATE",
+      "ZohoCRM.modules.custom.ALL",
+      "ZohoCRM.modules.notes.CREATE",
+      "ZohoCRM.org.variables.ALL",
+      "ZohoCRM.settings.fields.READ",
+      "ZohoCRM.settings.profiles.READ",
+      "ZohoCRM.users.READ"
+    ]
+  }
+}

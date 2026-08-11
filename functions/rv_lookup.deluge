@@ -1,0 +1,514 @@
+// ════════════════════════════════════════════════════════════════════════════
+//  rv_lookup  —  V1.0-r1  —  READ-ONLY Rivhit reads + settings
+//  PASTE BODY ONLY. Category: REST API. Return type: STRING. Argument: crmAPIRequest.
+//  A signature line in the body is a syntax error — Sigma generates the wrapper.
+//
+//  This is the one deliberately generic function. It is safe because every
+//  method it can reach is READ-ONLY and on the whitelist below. Anything that
+//  writes gets its own function with its own validation.
+// ════════════════════════════════════════════════════════════════════════════
+
+prefix = "rivhitzohocrmextension__";
+out = Map();
+out.put("ok",false);
+out.put("code","init");
+out.put("message","");
+
+// ── 1. Extract arguments (three possible locations, platform-dependent) ─────
+argsMap = Map();
+reqBody = crmAPIRequest.get("body");
+if(reqBody != null && reqBody.toString() != "" && reqBody.toString() != "null")
+{
+	try
+	{
+		cand = reqBody.toString().toMap();
+		if(cand.get("arguments") != null)
+		{
+			argsMap = cand.get("arguments").toString().toMap();
+		}
+		else
+		{
+			argsMap = cand;
+		}
+	}
+	catch (e)
+	{
+		argsMap = Map();
+	}
+}
+if(argsMap.get("op") == null)
+{
+	pr = crmAPIRequest.get("params");
+	if(pr != null)
+	{
+		try
+		{
+			pm = pr.toString().toMap();
+			if(pm.get("arguments") != null)
+			{
+				argsMap = pm.get("arguments").toString().toMap();
+			}
+			else
+			{
+				argsMap = pm;
+			}
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+if(argsMap.get("op") == null)
+{
+	ra = crmAPIRequest.get("arguments");
+	if(ra != null && ra.toString() != "")
+	{
+		try
+		{
+			argsMap = ra.toString().toMap();
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+op = ifnull(argsMap.get("op"),"").toString();
+
+// ── 2. Load settings from org variables ─────────────────────────────────────
+apiToken = ifnull(zoho.crm.getOrgVariable(prefix + "API_Token"),"").toString();
+companyId = ifnull(zoho.crm.getOrgVariable(prefix + "Company_ID"),"").toString();
+defLang = ifnull(zoho.crm.getOrgVariable(prefix + "Default_Language"),"he").toString();
+typeCacheRaw = ifnull(zoho.crm.getOrgVariable(prefix + "Type_Cache"),"").toString();
+rolesRaw = ifnull(zoho.crm.getOrgVariable(prefix + "Doc_Type_Roles"),"").toString();
+payMapRaw = ifnull(zoho.crm.getOrgVariable(prefix + "Payment_Type_Map"),"").toString();
+permsRaw = ifnull(zoho.crm.getOrgVariable(prefix + "Action_Permissions"),"").toString();
+sortVat = ifnull(zoho.crm.getOrgVariable(prefix + "Sort_Code_VAT"),"100").toString();
+sortExempt = ifnull(zoho.crm.getOrgVariable(prefix + "Sort_Code_Exempt"),"150").toString();
+defCurrency = ifnull(zoho.crm.getOrgVariable(prefix + "Default_Currency_ID"),"1").toString();
+defUpdInv = ifnull(zoho.crm.getOrgVariable(prefix + "Default_Update_Inventory"),"true").toString();
+sendMailDef = ifnull(zoho.crm.getOrgVariable(prefix + "Send_Mail_Default"),"false").toString();
+digitalSig = ifnull(zoho.crm.getOrgVariable(prefix + "Digital_Signature"),"false").toString();
+confirmReq = ifnull(zoho.crm.getOrgVariable(prefix + "Confirmation_Required"),"false").toString();
+quota = ifnull(zoho.crm.getOrgVariable(prefix + "Monthly_Doc_Quota"),"").toString();
+icEnabled = ifnull(zoho.crm.getOrgVariable(prefix + "ICredit_Enabled"),"false").toString();
+icIssues = ifnull(zoho.crm.getOrgVariable(prefix + "ICredit_Issues_Document"),"true").toString();
+icTest = ifnull(zoho.crm.getOrgVariable(prefix + "ICredit_Test_Mode"),"true").toString();
+accountMode = ifnull(zoho.crm.getOrgVariable(prefix + "Account_Mode"),"demo").toString();
+usageRaw = ifnull(zoho.crm.getOrgVariable(prefix + "Usage_Counter"),"").toString();
+
+// ── 3. op = settings : return the config the widgets need (secrets masked) ──
+if(op == "settings")
+{
+	s = Map();
+	s.put("configured",apiToken != "");
+	s.put("accountMode",accountMode);
+	s.put("companyId",companyId);
+	s.put("defaultLanguage",defLang);
+	s.put("apiTokenMasked",if(apiToken == "","", "•••• " + apiToken.right(4)));
+	s.put("sortCodeVat",sortVat);
+	s.put("sortCodeExempt",sortExempt);
+	s.put("defaultCurrencyId",defCurrency);
+	s.put("defaultUpdateInventory",defUpdInv == "true");
+	s.put("sendMailDefault",sendMailDef == "true");
+	s.put("digitalSignature",digitalSig == "true");
+	s.put("confirmationRequired",confirmReq == "true");
+	s.put("monthlyQuota",quota);
+	s.put("icreditEnabled",icEnabled == "true");
+	s.put("icreditIssuesDocument",icIssues == "true");
+	s.put("icreditTestMode",icTest == "true");
+	docTypes = List();
+	recTypes = List();
+	payTypes = List();
+	currencies = List();
+	banks = List();
+	sortCodes = List();
+	vatRate = "";
+	cachedAt = "";
+	if(typeCacheRaw != "")
+	{
+		try
+		{
+			tc = typeCacheRaw.toMap();
+			docTypes = ifnull(tc.get("documentTypes"),List());
+			recTypes = ifnull(tc.get("receiptTypes"),List());
+			payTypes = ifnull(tc.get("paymentTypes"),List());
+			currencies = ifnull(tc.get("currencies"),List());
+			banks = ifnull(tc.get("banks"),List());
+			sortCodes = ifnull(tc.get("sortCodes"),List());
+			vatRate = ifnull(tc.get("vatRate"),"").toString();
+			cachedAt = ifnull(tc.get("cachedAt"),"").toString();
+		}
+		catch (e)
+		{
+			cachedAt = "";
+		}
+	}
+	s.put("documentTypes",docTypes);
+	s.put("receiptTypes",recTypes);
+	s.put("paymentTypes",payTypes);
+	s.put("currencies",currencies);
+	s.put("banks",banks);
+	s.put("sortCodes",sortCodes);
+	s.put("vatRate",vatRate);
+	s.put("typesCachedAt",cachedAt);
+	roles = Map();
+	if(rolesRaw != "")
+	{
+		try
+		{
+			roles = rolesRaw.toMap();
+		}
+		catch (e)
+		{
+			roles = Map();
+		}
+	}
+	s.put("roles",roles);
+	payMap = Map();
+	if(payMapRaw != "")
+	{
+		try
+		{
+			payMap = payMapRaw.toMap();
+		}
+		catch (e)
+		{
+			payMap = Map();
+		}
+	}
+	s.put("paymentTypeMap",payMap);
+	perms = Map();
+	if(permsRaw != "")
+	{
+		try
+		{
+			perms = permsRaw.toMap();
+		}
+		catch (e)
+		{
+			perms = Map();
+		}
+	}
+	s.put("permissions",perms);
+	usage = Map();
+	if(usageRaw != "")
+	{
+		try
+		{
+			usage = usageRaw.toMap();
+		}
+		catch (e)
+		{
+			usage = Map();
+		}
+	}
+	s.put("usage",usage);
+	out.put("ok",true);
+	out.put("code","ok");
+	out.put("data",s);
+	return out.toString();
+}
+
+// Everything past this point needs a token.
+if(apiToken == "")
+{
+	out.put("code","not_configured");
+	out.put("message","ההרחבה טרם הוגדרה — חסר API Token");
+	return out.toString();
+}
+baseUrl = "https://api.rivhit.co.il/online/RivhitOnlineAPI.svc/";
+
+// ── 4. op = profiles : list CRM profiles for the permissions matrix ─────────
+if(op == "profiles")
+{
+	plist = List();
+	try
+	{
+		presp = invokeurl
+		[
+			url :"https://www.zohoapis.com/crm/v5/settings/profiles"
+			type :GET
+			connection :"crm_oauth_connection"
+		];
+		for each  p in ifnull(presp.get("profiles"),List())
+		{
+			row = Map();
+			row.put("id",ifnull(p.get("id"),"").toString());
+			row.put("name",ifnull(p.get("name"),"").toString());
+			plist.add(row);
+		}
+	}
+	catch (e)
+	{
+		info "rv_lookup profiles: " + e.toString();
+	}
+	if(plist.size() == 0)
+	{
+		try
+		{
+			presp2 = zoho.crm.invokeConnector("crm.get",{"apiname":"settings/profiles"});
+			for each  p2 in ifnull(ifnull(presp2.get("response"),Map()).get("profiles"),List())
+			{
+				row2 = Map();
+				row2.put("id",ifnull(p2.get("id"),"").toString());
+				row2.put("name",ifnull(p2.get("name"),"").toString());
+				plist.add(row2);
+			}
+		}
+		catch (e2)
+		{
+			info "rv_lookup profiles fallback: " + e2.toString();
+		}
+	}
+	d = Map();
+	d.put("profiles",plist);
+	out.put("ok",true);
+	out.put("code","ok");
+	out.put("data",d);
+	return out.toString();
+}
+
+// ── 5. Whitelisted read-only Rivhit methods ────────────────────────────────
+// A generic proxy is only safe while it cannot write. Keep this list read-only.
+methodName = "";
+if(op == "ping")
+{
+	methodName = "Company.Details";
+}
+else if(op == "types")
+{
+	methodName = "MULTI";
+}
+else if(op == "documentDetails")
+{
+	methodName = "Document.Details";
+}
+else if(op == "receiptDetails")
+{
+	methodName = "Receipt.Details";
+}
+else if(op == "documentList")
+{
+	methodName = "Document.List";
+}
+else if(op == "receiptList")
+{
+	methodName = "Receipt.List";
+}
+else if(op == "openDocuments")
+{
+	methodName = "Customer.OpenDocuments";
+}
+else if(op == "closedDocuments")
+{
+	methodName = "Customer.ClosedDocuments";
+}
+else if(op == "customerGet")
+{
+	methodName = "Customer.Get";
+}
+else if(op == "customerList")
+{
+	methodName = "Customer.List";
+}
+else if(op == "customerBalance")
+{
+	methodName = "Customer.Balance";
+}
+else if(op == "itemList")
+{
+	methodName = "Item.List";
+}
+else if(op == "itemDetails")
+{
+	methodName = "Item.Details";
+}
+else if(op == "itemQuantity")
+{
+	methodName = "Item.Quantity";
+}
+else if(op == "storageList")
+{
+	methodName = "Storage.List";
+}
+else if(op == "vatRate")
+{
+	methodName = "Accounting.VatRate";
+}
+if(methodName == "")
+{
+	out.put("code","bad_op");
+	out.put("message","פעולה לא מוכרת: " + op);
+	return out.toString();
+}
+
+// ── 6. op = types : refresh the whole catalog in one shot ──────────────────
+if(methodName == "MULTI")
+{
+	cache = Map();
+	tokenOnly = Map();
+	tokenOnly.put("api_token",apiToken);
+	calls = List();
+	calls.add("Document.TypeList");
+	calls.add("Receipt.TypeList");
+	calls.add("Payment.TypeList");
+	calls.add("Currency.List");
+	calls.add("Payment.BankList");
+	calls.add("Accounting.SortCodeList");
+	calls.add("Accounting.VatRate");
+	failed = List();
+	for each  m in calls
+	{
+		try
+		{
+			rr = invokeurl
+			[
+				url :baseUrl + m
+				type :POST
+				parameters :tokenOnly.toString()
+				headers :{"Content-Type":"application/json"}
+			];
+			ec = -9999;
+			try
+			{
+				ec = ifnull(rr.get("error_code"),-9999).toLong();
+			}
+			catch (pe)
+			{
+				ec = -9999;
+			}
+			if(ec == 0)
+			{
+				dd = ifnull(rr.get("data"),Map());
+				if(m == "Document.TypeList")
+				{
+					cache.put("documentTypes",ifnull(dd.get("document_type_list"),List()));
+				}
+				else if(m == "Receipt.TypeList")
+				{
+					cache.put("receiptTypes",ifnull(dd.get("receipt_type_list"),List()));
+				}
+				else if(m == "Payment.TypeList")
+				{
+					cache.put("paymentTypes",ifnull(dd.get("payment_type_list"),List()));
+				}
+				else if(m == "Currency.List")
+				{
+					cache.put("currencies",ifnull(dd.get("currency_list"),List()));
+				}
+				else if(m == "Payment.BankList")
+				{
+					cache.put("banks",ifnull(dd.get("bank_list"),List()));
+				}
+				else if(m == "Accounting.SortCodeList")
+				{
+					cache.put("sortCodes",ifnull(dd.get("sort_code_list"),List()));
+				}
+				else if(m == "Accounting.VatRate")
+				{
+					cache.put("vatRate",ifnull(dd.get("vat_rate"),"").toString());
+				}
+			}
+			else
+			{
+				failed.add(m);
+			}
+		}
+		catch (ce)
+		{
+			failed.add(m);
+		}
+	}
+	cache.put("cachedAt",zoho.currenttime.toString("yyyy-MM-dd'T'HH:mm:ssZ"));
+	try
+	{
+		zoho.crm.invokeConnector("crm.set",{"apiname":prefix + "Type_Cache","value":cache.toString()});
+	}
+	catch (se)
+	{
+		info "rv_lookup: could not persist Type_Cache: " + se.toString();
+	}
+	cache.put("failed",failed);
+	out.put("ok",true);
+	out.put("code","ok");
+	out.put("data",cache);
+	return out.toString();
+}
+
+// ── 7. Single whitelisted read ─────────────────────────────────────────────
+body = Map();
+body.put("api_token",apiToken);
+params = ifnull(argsMap.get("params"),Map());
+for each  k in params.keys()
+{
+	if(k != "api_token")
+	{
+		body.put(k,params.get(k));
+	}
+}
+respData = Map();
+callOk = false;
+callErr = "";
+callCode = "";
+try
+{
+	rr2 = invokeurl
+	[
+		url :baseUrl + methodName
+		type :POST
+		parameters :body.toString()
+		headers :{"Content-Type":"application/json"}
+	];
+	ec2 = -9999;
+	try
+	{
+		ec2 = ifnull(rr2.get("error_code"),-9999).toLong();
+	}
+	catch (pe2)
+	{
+		ec2 = -9999;
+	}
+	if(ec2 == -9999)
+	{
+		callErr = "תשובה לא קריאה מרווחית";
+		callCode = "unparseable";
+	}
+	else if(ec2 == 0)
+	{
+		callOk = true;
+		respData = ifnull(rr2.get("data"),Map());
+	}
+	else if(ec2 == -2)
+	{
+		// NO_DATA_FOUND is "empty", not "broken".
+		callOk = true;
+		respData = Map();
+		respData.put("empty",true);
+	}
+	else
+	{
+		callErr = ifnull(rr2.get("client_message"),"שגיאה מרווחית").toString();
+		callCode = "rivhit_" + ec2;
+		info "rv_lookup " + methodName + " debug: " + ifnull(rr2.get("debug_message"),"").toString();
+	}
+}
+catch (te)
+{
+	callErr = "שגיאת תקשורת מול רווחית";
+	callCode = "transport";
+	info "rv_lookup transport " + methodName + ": " + te.toString();
+}
+if(callOk)
+{
+	out.put("ok",true);
+	out.put("code","ok");
+	out.put("data",respData);
+}
+else
+{
+	out.put("code",callCode);
+	out.put("message",callErr);
+}
+return out.toString();

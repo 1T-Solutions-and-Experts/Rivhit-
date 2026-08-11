@@ -1,0 +1,290 @@
+// ════════════════════════════════════════════════════════════════════════════
+//  rv_save_settings  —  V1.0-r1
+//  PASTE BODY ONLY. Category: REST API. Return: STRING. Argument: crmAPIRequest.
+//
+//  Org-variable writes from widget JavaScript return HTTP 400 on this platform.
+//  This function is the ONLY way settings get persisted.
+//
+//  Two guards that matter:
+//   * a blank API token means "keep the existing one" — the widget never echoes
+//     the secret back, so an empty field is not an instruction to erase it;
+//   * an administrator cannot remove their own access to Settings, because a
+//     saved matrix that locks everyone out bricks the extension.
+// ════════════════════════════════════════════════════════════════════════════
+
+prefix = "rivhitzohocrmextension__";
+out = Map();
+out.put("ok",false);
+out.put("code","init");
+out.put("message","");
+
+// ── 1. Extract arguments ────────────────────────────────────────────────────
+argsMap = Map();
+reqBody = crmAPIRequest.get("body");
+if(reqBody != null && reqBody.toString() != "" && reqBody.toString() != "null")
+{
+	try
+	{
+		cand = reqBody.toString().toMap();
+		if(cand.get("arguments") != null)
+		{
+			argsMap = cand.get("arguments").toString().toMap();
+		}
+		else
+		{
+			argsMap = cand;
+		}
+	}
+	catch (e)
+	{
+		argsMap = Map();
+	}
+}
+if(argsMap.get("settings") == null)
+{
+	pr = crmAPIRequest.get("params");
+	if(pr != null)
+	{
+		try
+		{
+			pm = pr.toString().toMap();
+			if(pm.get("arguments") != null)
+			{
+				argsMap = pm.get("arguments").toString().toMap();
+			}
+			else
+			{
+				argsMap = pm;
+			}
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+if(argsMap.get("settings") == null)
+{
+	ra = crmAPIRequest.get("arguments");
+	if(ra != null && ra.toString() != "")
+	{
+		try
+		{
+			argsMap = ra.toString().toMap();
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+inSettings = ifnull(argsMap.get("settings"),Map());
+if(inSettings.isEmpty())
+{
+	out.put("code","no_payload");
+	out.put("message","לא התקבלו הגדרות לשמירה");
+	out.put("debugKeys",crmAPIRequest.keys().toString());
+	return out.toString();
+}
+
+// ── 2. Only an administrator may save settings ─────────────────────────────
+callerIsAdmin = false;
+callerProfileId = "";
+callerProfileName = "";
+try
+{
+	me = zoho.crm.getRecordById("users",zoho.loginuserid);
+	prof = ifnull(me.get("profile"),Map());
+	callerProfileId = ifnull(prof.get("id"),"").toString();
+	callerProfileName = ifnull(prof.get("name"),"").toString();
+	if(callerProfileName.equalsIgnoreCase("Administrator") || callerProfileName.containsIgnoreCase("admin"))
+	{
+		callerIsAdmin = true;
+	}
+}
+catch (ue)
+{
+	info "rv_save_settings: could not resolve caller profile: " + ue.toString();
+	callerIsAdmin = true;
+	// fail open on the very first install, before any profile data exists
+}
+if(!callerIsAdmin)
+{
+	out.put("code","forbidden");
+	out.put("message","רק מנהל מערכת רשאי לשמור הגדרות");
+	return out.toString();
+}
+
+// ── 3. No self-lockout: the saver keeps their own Settings access ──────────
+permsIn = ifnull(inSettings.get("permissions"),Map());
+if(!permsIn.isEmpty() && callerProfileId != "")
+{
+	saveAllowed = ifnull(permsIn.get("saveSettings"),List());
+	found = false;
+	for each  pid in saveAllowed
+	{
+		if(pid.toString() == callerProfileId || pid.toString() == callerProfileName)
+		{
+			found = true;
+		}
+	}
+	if(!found)
+	{
+		saveAllowed.add(callerProfileId);
+		permsIn.put("saveSettings",saveAllowed);
+		out.put("selfLockoutPrevented",true);
+	}
+}
+
+// ── 4. Build the write list. Blank secret = keep existing. ─────────────────
+writes = Map();
+existingToken = ifnull(zoho.crm.getOrgVariable(prefix + "API_Token"),"").toString();
+newToken = ifnull(inSettings.get("apiToken"),"").toString();
+if(newToken != "")
+{
+	writes.put("API_Token",newToken);
+}
+else if(existingToken == "")
+{
+	writes.put("API_Token","");
+}
+existingIcProd = ifnull(zoho.crm.getOrgVariable(prefix + "ICredit_Group_Token_Prod"),"").toString();
+newIcProd = ifnull(inSettings.get("icreditTokenProd"),"").toString();
+if(newIcProd != "")
+{
+	writes.put("ICredit_Group_Token_Prod",newIcProd);
+}
+else if(existingIcProd == "")
+{
+	writes.put("ICredit_Group_Token_Prod","");
+}
+existingIcTest = ifnull(zoho.crm.getOrgVariable(prefix + "ICredit_Group_Token_Test"),"").toString();
+newIcTest = ifnull(inSettings.get("icreditTokenTest"),"").toString();
+if(newIcTest != "")
+{
+	writes.put("ICredit_Group_Token_Test",newIcTest);
+}
+else if(existingIcTest == "")
+{
+	writes.put("ICredit_Group_Token_Test","");
+}
+writes.put("Account_Mode",ifnull(inSettings.get("accountMode"),"demo").toString());
+writes.put("Company_ID",ifnull(inSettings.get("companyId"),"").toString());
+writes.put("Default_Language",ifnull(inSettings.get("defaultLanguage"),"he").toString());
+writes.put("Sort_Code_VAT",ifnull(inSettings.get("sortCodeVat"),"100").toString());
+writes.put("Sort_Code_Exempt",ifnull(inSettings.get("sortCodeExempt"),"150").toString());
+writes.put("Default_Currency_ID",ifnull(inSettings.get("defaultCurrencyId"),"1").toString());
+writes.put("Default_Update_Inventory",ifnull(inSettings.get("defaultUpdateInventory"),"true").toString());
+writes.put("Send_Mail_Default",ifnull(inSettings.get("sendMailDefault"),"false").toString());
+writes.put("Digital_Signature",ifnull(inSettings.get("digitalSignature"),"false").toString());
+writes.put("Confirmation_Required",ifnull(inSettings.get("confirmationRequired"),"false").toString());
+writes.put("Monthly_Doc_Quota",ifnull(inSettings.get("monthlyQuota"),"").toString());
+writes.put("Reconcile_Window_Days",ifnull(inSettings.get("reconcileWindowDays"),"35").toString());
+writes.put("ICredit_Enabled",ifnull(inSettings.get("icreditEnabled"),"false").toString());
+writes.put("ICredit_Issues_Document",ifnull(inSettings.get("icreditIssuesDocument"),"true").toString());
+writes.put("ICredit_Test_Mode",ifnull(inSettings.get("icreditTestMode"),"true").toString());
+rolesIn = ifnull(inSettings.get("roles"),Map());
+writes.put("Doc_Type_Roles",rolesIn.toString());
+payMapIn = ifnull(inSettings.get("paymentTypeMap"),Map());
+writes.put("Payment_Type_Map",payMapIn.toString());
+writes.put("Action_Permissions",permsIn.toString());
+
+// ── 5. Write each variable. Optional ones are best-effort: a missing custom
+//        property must never block saving the core settings. ────────────────
+optional = List();
+optional.add("Monthly_Doc_Quota");
+optional.add("Reconcile_Window_Days");
+optional.add("Digital_Signature");
+optional.add("Action_Permissions");
+optional.add("Usage_Counter");
+optional.add("Sync_State");
+results = Map();
+errorCount = 0;
+for each  key in writes.keys()
+{
+	varName = prefix + key;
+	try
+	{
+		r = zoho.crm.invokeConnector("crm.set",{"apiname":varName,"value":writes.get(key).toString()});
+		results.put(key,"ok");
+	}
+	catch (we)
+	{
+		isOptional = false;
+		for each  o in optional
+		{
+			if(o == key)
+			{
+				isOptional = true;
+			}
+		}
+		if(isOptional)
+		{
+			results.put(key,"skipped_optional");
+		}
+		else
+		{
+			errorCount = errorCount + 1;
+			results.put(key,"ERROR: " + we.toString());
+		}
+	}
+}
+
+// ── 6. Read back and verify — a save that is not verified is a rumour ──────
+verify = Map();
+readbackFailures = 0;
+for each  key2 in writes.keys()
+{
+	expected = writes.get(key2).toString();
+	actual = ifnull(zoho.crm.getOrgVariable(prefix + key2),"").toString();
+	if(key2 == "API_Token" || key2 == "ICredit_Group_Token_Prod" || key2 == "ICredit_Group_Token_Test")
+	{
+		if(actual == "" && expected != "")
+		{
+			readbackFailures = readbackFailures + 1;
+			verify.put(key2,"empty_after_write");
+		}
+		else
+		{
+			verify.put(key2,"ok");
+		}
+	}
+	else if(actual == expected)
+	{
+		verify.put(key2,"ok");
+	}
+	else
+	{
+		isOpt2 = false;
+		for each  o2 in optional
+		{
+			if(o2 == key2)
+			{
+				isOpt2 = true;
+			}
+		}
+		if(!isOpt2)
+		{
+			readbackFailures = readbackFailures + 1;
+		}
+		verify.put(key2,"mismatch");
+	}
+}
+d = Map();
+d.put("written",results);
+d.put("verified",verify);
+d.put("errorCount",errorCount);
+d.put("readbackFailures",readbackFailures);
+if(errorCount == 0 && readbackFailures == 0)
+{
+	out.put("ok",true);
+	out.put("code","ok");
+	out.put("message","ההגדרות נשמרו");
+}
+else
+{
+	out.put("code","partial");
+	out.put("message","חלק מההגדרות לא נשמרו — ראה פירוט");
+}
+out.put("data",d);
+return out.toString();

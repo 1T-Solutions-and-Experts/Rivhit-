@@ -1,0 +1,580 @@
+// ════════════════════════════════════════════════════════════════════════════
+//  rv_issue_receipt  —  V1.0-r1  —  BILLABLE
+//  PASTE BODY ONLY. Category: REST API. Return: STRING. Argument: crmAPIRequest.
+//
+//  Issues a receipt that CLOSES the source document. The closing trio is
+//  closed_document_type + closed_document_number + document_is_receipt:true.
+//  Same safe-write sequence as rv_issue_document: dry run (no idempotency key),
+//  persist the key, real call, recover on ambiguity.
+// ════════════════════════════════════════════════════════════════════════════
+
+prefix = "rivhitzohocrmextension__";
+out = Map();
+out.put("ok",false);
+out.put("code","init");
+out.put("message","");
+
+// ── Arguments ───────────────────────────────────────────────────────────────
+argsMap = Map();
+reqBody = crmAPIRequest.get("body");
+if(reqBody != null && reqBody.toString() != "" && reqBody.toString() != "null")
+{
+	try
+	{
+		cand = reqBody.toString().toMap();
+		if(cand.get("arguments") != null)
+		{
+			argsMap = cand.get("arguments").toString().toMap();
+		}
+		else
+		{
+			argsMap = cand;
+		}
+	}
+	catch (e)
+	{
+		argsMap = Map();
+	}
+}
+if(argsMap.get("recordId") == null)
+{
+	pr = crmAPIRequest.get("params");
+	if(pr != null)
+	{
+		try
+		{
+			pm = pr.toString().toMap();
+			if(pm.get("arguments") != null)
+			{
+				argsMap = pm.get("arguments").toString().toMap();
+			}
+			else
+			{
+				argsMap = pm;
+			}
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+if(argsMap.get("recordId") == null)
+{
+	ra = crmAPIRequest.get("arguments");
+	if(ra != null && ra.toString() != "")
+	{
+		try
+		{
+			argsMap = ra.toString().toMap();
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+moduleName = ifnull(argsMap.get("module"),"Invoices").toString();
+recordId = ifnull(argsMap.get("recordId"),"").toString();
+receiptType = ifnull(argsMap.get("receiptType"),0).toLong();
+amount = ifnull(argsMap.get("amount"),0).toDecimal();
+payType = ifnull(argsMap.get("paymentType"),0).toLong();
+payDetails = ifnull(argsMap.get("paymentDetails"),Map());
+currencyId = ifnull(argsMap.get("currencyId"),1).toLong();
+exchangeRate = ifnull(argsMap.get("exchangeRate"),0).toDecimal();
+numPayments = ifnull(argsMap.get("numberOfPayments"),1).toLong();
+sendMail = ifnull(argsMap.get("sendMail"),false);
+comments = ifnull(argsMap.get("comments"),"").toString();
+sourceLabel = ifnull(argsMap.get("sourceLabel"),"iCredit").toString();
+dryRunOnly = ifnull(argsMap.get("dryRunOnly"),false);
+skipPermission = ifnull(argsMap.get("internal"),false);
+if(recordId == "" || receiptType == 0 || payType == 0 || amount <= 0)
+{
+	out.put("code","bad_request");
+	out.put("message","חסרים פרטים: סוג קבלה, אמצעי תשלום או סכום");
+	return out.toString();
+}
+
+// ── Settings ────────────────────────────────────────────────────────────────
+apiToken = ifnull(zoho.crm.getOrgVariable(prefix + "API_Token"),"").toString();
+if(apiToken == "")
+{
+	out.put("code","not_configured");
+	out.put("message","ההרחבה טרם הוגדרה");
+	return out.toString();
+}
+baseUrl = "https://api.rivhit.co.il/online/RivhitOnlineAPI.svc/";
+defLang = ifnull(zoho.crm.getOrgVariable(prefix + "Default_Language"),"he").toString();
+digitalSig = ifnull(zoho.crm.getOrgVariable(prefix + "Digital_Signature"),"false").toString() == "true";
+permsRaw = ifnull(zoho.crm.getOrgVariable(prefix + "Action_Permissions"),"").toString();
+
+// ── Permission (skipped for internal calls from the IPN handler) ───────────
+if(!skipPermission && permsRaw != "")
+{
+	allowed = true;
+	try
+	{
+		perms = permsRaw.toMap();
+		allowList = ifnull(perms.get("recordPayment"),List());
+		if(allowList.size() > 0)
+		{
+			allowed = false;
+			me = zoho.crm.getRecordById("users",zoho.loginuserid);
+			myProf = ifnull(me.get("profile"),Map());
+			myId = ifnull(myProf.get("id"),"").toString();
+			myName = ifnull(myProf.get("name"),"").toString();
+			for each  p in allowList
+			{
+				if(p.toString() == myId || p.toString() == myName)
+				{
+					allowed = true;
+				}
+			}
+		}
+	}
+	catch (pe)
+	{
+		allowed = true;
+	}
+	if(!allowed)
+	{
+		out.put("code","forbidden");
+		out.put("message","אין לך הרשאה לרשום תשלומים");
+		return out.toString();
+	}
+}
+
+// ── Read the record ─────────────────────────────────────────────────────────
+rec = Map();
+try
+{
+	rec = zoho.crm.getRecordById(moduleName,recordId.toLong());
+}
+catch (re)
+{
+	rec = Map();
+}
+if(rec.isEmpty() || rec.get("id") == null)
+{
+	out.put("code","record_not_found");
+	out.put("message","הרשומה לא נמצאה");
+	return out.toString();
+}
+fDocNum = "Rivhit_Document_Number";
+fDocType = "Rivhit_Document_Type";
+fStatus = "Rivhit_Payment_Status";
+fPaid = "Rivhit_Paid_Amount";
+fPaidDate = "Rivhit_Paid_Date";
+fIsClosed = "Rivhit_Is_Closed";
+fSync = "Rivhit_Last_Sync";
+fReqRef = "Rivhit_Request_Reference";
+for each  k in rec.keys()
+{
+	ks = k.toString();
+	if(ks.endsWith("Rivhit_Document_Number"))
+	{
+		fDocNum = ks;
+	}
+	else if(ks.endsWith("Rivhit_Document_Type"))
+	{
+		fDocType = ks;
+	}
+	else if(ks.endsWith("Rivhit_Payment_Status"))
+	{
+		fStatus = ks;
+	}
+	else if(ks.endsWith("Rivhit_Paid_Amount"))
+	{
+		fPaid = ks;
+	}
+	else if(ks.endsWith("Rivhit_Paid_Date"))
+	{
+		fPaidDate = ks;
+	}
+	else if(ks.endsWith("Rivhit_Is_Closed"))
+	{
+		fIsClosed = ks;
+	}
+	else if(ks.endsWith("Rivhit_Last_Sync"))
+	{
+		fSync = ks;
+	}
+	else if(ks.endsWith("Rivhit_Request_Reference"))
+	{
+		fReqRef = ks;
+	}
+}
+closeDocType = ifnull(rec.get(fDocType),0).toLong();
+closeDocNum = ifnull(rec.get(fDocNum),0).toLong();
+if(closeDocNum == 0)
+{
+	out.put("code","no_document");
+	out.put("message","לא ניתן לרשום תשלום — טרם הופק מסמך ברווחית");
+	return out.toString();
+}
+alreadyPaid = ifnull(rec.get(fPaid),0).toDecimal();
+
+// ── Customer ────────────────────────────────────────────────────────────────
+custId = 0;
+custName = "לקוח";
+acct = ifnull(rec.get("Account_Name"),Map());
+contact = ifnull(rec.get("Contact_Name"),Map());
+billTo = acct;
+billModule = "Accounts";
+if(billTo.isEmpty() || billTo.get("id") == null)
+{
+	billTo = contact;
+	billModule = "Contacts";
+}
+if(!billTo.isEmpty() && billTo.get("id") != null)
+{
+	try
+	{
+		br = zoho.crm.getRecordById(billModule,billTo.get("id").toLong());
+		for each  bk in br.keys()
+		{
+			if(bk.toString().endsWith("Rivhit_Customer_ID"))
+			{
+				custId = ifnull(br.get(bk),0).toLong();
+			}
+		}
+		custName = ifnull(br.get("Account_Name"),ifnull(br.get("Last_Name"),custName)).toString();
+	}
+	catch (be)
+	{
+		custId = 0;
+	}
+}
+if(custName.length() > 30)
+{
+	custName = custName.subString(0,30);
+}
+if(comments.length() > 400)
+{
+	comments = comments.subString(0,400);
+}
+
+// ── Payload ─────────────────────────────────────────────────────────────────
+pay = Map();
+pay.put("payment_type",payType);
+if(currencyId == 1)
+{
+	pay.put("amount_nis",amount.round(2));
+}
+else
+{
+	pay.put("amount_mtc",amount.round(2));
+}
+if(numPayments > 1)
+{
+	pay.put("number_of_payments",numPayments);
+}
+for each  pk in payDetails.keys()
+{
+	pay.put(pk,payDetails.get(pk));
+}
+pays = List();
+pays.add(pay);
+payload = Map();
+payload.put("api_token",apiToken);
+payload.put("receipt_type",receiptType);
+payload.put("customer_id",custId);
+payload.put("payments",pays);
+payload.put("language",defLang);
+payload.put("send_mail",sendMail);
+payload.put("currency_id",currencyId);
+if(currencyId != 1 && exchangeRate > 0)
+{
+	payload.put("exchange_rate",exchangeRate);
+}
+if(digitalSig)
+{
+	payload.put("digital_signature",true);
+}
+if(comments != "")
+{
+	payload.put("comments",comments);
+}
+if(custId == 0)
+{
+	payload.put("create_customer",true);
+	payload.put("last_name",custName);
+}
+// The closing trio — this is what marks the source document settled.
+payload.put("closed_document_type",closeDocType);
+payload.put("closed_document_number",closeDocNum);
+payload.put("document_is_receipt",true);
+
+// ── Dry run (no idempotency key — design review C1) ────────────────────────
+dryPayload = payload;
+dryPayload.put("check_only",true);
+dryOk = false;
+dryMsg = "";
+try
+{
+	dr = invokeurl
+	[
+		url :baseUrl + "Receipt.New"
+		type :POST
+		parameters :dryPayload.toString()
+		headers :{"Content-Type":"application/json"}
+	];
+	dec = -9999;
+	try
+	{
+		dec = ifnull(dr.get("error_code"),-9999).toLong();
+	}
+	catch (dp)
+	{
+		dec = -9999;
+	}
+	if(dec == 0)
+	{
+		dryOk = true;
+	}
+	else if(dec == -9999)
+	{
+		dryMsg = "תשובה לא קריאה מרווחית בשלב הבדיקה";
+	}
+	else
+	{
+		dryMsg = ifnull(dr.get("client_message"),"הבדיקה נכשלה").toString();
+		info "rv_issue_receipt dry-run debug: " + ifnull(dr.get("debug_message"),"").toString();
+	}
+}
+catch (de)
+{
+	dryMsg = "שגיאת תקשורת בשלב הבדיקה";
+}
+if(!dryOk)
+{
+	out.put("code","validation_failed");
+	out.put("message",dryMsg);
+	return out.toString();
+}
+if(dryRunOnly)
+{
+	out.put("ok",true);
+	out.put("code","dry_run_ok");
+	out.put("message","הבדיקה עברה");
+	return out.toString();
+}
+
+// ── Idempotency key, persisted first ───────────────────────────────────────
+revision = 1;
+prevRef = ifnull(rec.get(fReqRef),"").toString();
+if(prevRef.contains(":receipt:"))
+{
+	try
+	{
+		parts = prevRef.toList(":");
+		revision = parts.get(parts.size() - 1).toLong() + 1;
+	}
+	catch (rv)
+	{
+		revision = 2;
+	}
+}
+reqRef = "zcrm:" + moduleName + ":" + recordId + ":receipt:" + revision;
+try
+{
+	pu = Map();
+	pu.put(fReqRef,reqRef);
+	zoho.crm.updateRecord(moduleName,recordId.toLong(),pu);
+}
+catch (pue)
+{
+	info "rv_issue_receipt: could not persist request_reference: " + pue.toString();
+}
+
+// ── Real call ───────────────────────────────────────────────────────────────
+realPayload = payload;
+realPayload.remove("check_only");
+realPayload.put("request_reference",reqRef);
+realPayload.put("prevent_duplicates",true);
+issued = false;
+ambiguous = false;
+errMsg = "";
+errCode = "";
+rcpNumber = 0;
+rcpIdentity = "";
+rcpLink = "";
+try
+{
+	rr = invokeurl
+	[
+		url :baseUrl + "Receipt.New"
+		type :POST
+		parameters :realPayload.toString()
+		headers :{"Content-Type":"application/json"}
+	];
+	ec = -9999;
+	try
+	{
+		ec = ifnull(rr.get("error_code"),-9999).toLong();
+	}
+	catch (rp)
+	{
+		ec = -9999;
+	}
+	if(ec == -9999)
+	{
+		ambiguous = true;
+		errCode = "ambiguous_unparseable";
+		errMsg = "תשובה לא קריאה — יש לבצע שחזור";
+	}
+	else if(ec == 0)
+	{
+		issued = true;
+		dat = ifnull(rr.get("data"),Map());
+		rcpNumber = ifnull(dat.get("document_number"),0).toLong();
+		rcpIdentity = ifnull(dat.get("document_identity"),"").toString();
+		rcpLink = ifnull(dat.get("document_link"),"").toString();
+	}
+	else
+	{
+		errCode = "rivhit_" + ec;
+		errMsg = ifnull(rr.get("client_message"),"הפקת הקבלה נכשלה").toString();
+		info "rv_issue_receipt debug: " + ifnull(rr.get("debug_message"),"").toString();
+	}
+}
+catch (te)
+{
+	ambiguous = true;
+	errCode = "ambiguous_transport";
+	errMsg = "שגיאת תקשורת — לא ידוע אם הקבלה נוצרה. יש לבצע שחזור.";
+}
+if(!issued)
+{
+	out.put("code",errCode);
+	out.put("message",errMsg);
+	da = Map();
+	da.put("requestReference",reqRef);
+	da.put("recoverable",ambiguous);
+	out.put("data",da);
+	return out.toString();
+}
+
+// ── Persist ────────────────────────────────────────────────────────────────
+newPaid = (alreadyPaid + amount).round(2);
+docTotal = 0.0;
+try
+{
+	docTotal = ifnull(rec.get("Grand_Total"),ifnull(rec.get("Sub_Total"),0)).toDecimal();
+}
+catch (gte)
+{
+	docTotal = 0.0;
+}
+newStatus = "Partially Paid";
+fullyPaid = false;
+if(docTotal > 0 && newPaid >= docTotal - 0.01)
+{
+	newStatus = "Paid";
+	fullyPaid = true;
+}
+upd = Map();
+upd.put(fPaid,newPaid);
+upd.put(fStatus,newStatus);
+upd.put(fPaidDate,zoho.currentdate.toString("yyyy-MM-dd"));
+upd.put(fIsClosed,fullyPaid);
+try
+{
+	zoho.crm.updateRecord(moduleName,recordId.toLong(),upd);
+}
+catch (ue)
+{
+	info "rv_issue_receipt: CRM update failed: " + ue.toString();
+}
+try
+{
+	u2 = Map();
+	u2.put(fSync,zoho.currenttime);
+	zoho.crm.updateRecord(moduleName,recordId.toLong(),u2);
+}
+catch (ue2)
+{
+	info "rv_issue_receipt: timestamp skipped";
+}
+
+// ── Rivhit_Receipts child record ───────────────────────────────────────────
+receiptRecordId = "";
+try
+{
+	rrow = Map();
+	rrow.put("Name","קבלה " + rcpNumber);
+	rrow.put("Receipt_Type",receiptType);
+	rrow.put("Receipt_Number",rcpNumber);
+	rrow.put("Receipt_Identity",rcpIdentity);
+	rrow.put("Receipt_Amount",amount.round(2));
+	rrow.put("Receipt_Date",zoho.currentdate.toString("yyyy-MM-dd"));
+	rrow.put("Receipt_URL",rcpLink);
+	rrow.put("Closed_Document_Type",closeDocType);
+	rrow.put("Closed_Document_Number",closeDocNum);
+	rrow.put("Source",sourceLabel);
+	if(moduleName == "Invoices")
+	{
+		rrow.put("Invoice",recordId);
+	}
+	if(!billTo.isEmpty() && billTo.get("id") != null && billModule == "Accounts")
+	{
+		rrow.put("Account",billTo.get("id").toString());
+	}
+	cr = zoho.crm.createRecord("Rivhit_Receipts",rrow);
+	receiptRecordId = ifnull(cr.get("id"),"").toString();
+}
+catch (rce)
+{
+	info "rv_issue_receipt: could not create Rivhit_Receipts row: " + rce.toString();
+}
+
+// ── Audit note ─────────────────────────────────────────────────────────────
+try
+{
+	nt = Map();
+	nt.put("Note_Title","רווחית — קבלה " + rcpNumber);
+	nt.put("Note_Content","הופקה קבלה ברווחית" + "\n" + "מספר: " + rcpNumber + "\n" + "סכום: " + amount + "\n" + "סגרה מסמך: " + closeDocType + "/" + closeDocNum + "\n" + "סטטוס חדש: " + newStatus + "\n" + "מקור: " + sourceLabel + "\n" + "מפתח ייחודיות: " + reqRef);
+	nt.put("Parent_Id",recordId);
+	nt.put("se_module",moduleName);
+	zoho.crm.createRecord("Notes",nt);
+}
+catch (ne)
+{
+	info "rv_issue_receipt: note skipped";
+}
+try
+{
+	usageRaw = ifnull(zoho.crm.getOrgVariable(prefix + "Usage_Counter"),"").toString();
+	usage = Map();
+	if(usageRaw != "")
+	{
+		usage = usageRaw.toMap();
+	}
+	tm = zoho.currentdate.toString("yyyy-MM");
+	c0 = 0;
+	if(ifnull(usage.get("month"),"").toString() == tm)
+	{
+		c0 = ifnull(usage.get("count"),0).toLong();
+	}
+	usage.put("month",tm);
+	usage.put("count",c0 + 1);
+	zoho.crm.invokeConnector("crm.set",{"apiname":prefix + "Usage_Counter","value":usage.toString()});
+}
+catch (qe)
+{
+	info "rv_issue_receipt: usage counter skipped";
+}
+d = Map();
+d.put("receiptNumber",rcpNumber);
+d.put("receiptIdentity",rcpIdentity);
+d.put("receiptUrl",rcpLink);
+d.put("amount",amount.round(2));
+d.put("paidTotal",newPaid);
+d.put("status",newStatus);
+d.put("receiptRecordId",receiptRecordId);
+d.put("requestReference",reqRef);
+out.put("ok",true);
+out.put("code","issued");
+out.put("message","הקבלה הופקה בהצלחה");
+out.put("data",d);
+return out.toString();
