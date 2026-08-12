@@ -1,0 +1,238 @@
+// ════════════════════════════════════════════════════════════════════════════
+//  rv_log_change  —  V1.0-r1
+//  PASTE BODY ONLY. Category: AUTOMATION (not REST). Argument: a record argument
+//  named `recId` of type String, mapped to the record id by the workflow rule.
+//
+//  Wired to a workflow rule on Sales Orders and Invoices:
+//      trigger:   on edit
+//      condition: Rivhit_Document_Number is not empty
+//      action:    this function
+//
+//  Deliberately NOT widget code. The edits worth catching are the ones made in
+//  the ordinary record view by someone not thinking about Rivhit at all, and a
+//  hash check on widget open never sees those.
+//
+//  A Rivhit tax document is immutable; the CRM record is not. This does not block
+//  the edit — the client chose visibility over a lock — it makes the divergence
+//  attributable: which fields, old to new, by whom, when.
+// ════════════════════════════════════════════════════════════════════════════
+
+prefix = "rivhitzohocrmextension__";
+result = "skipped";
+moduleName = ifnull(moduleArg,"Invoices").toString();
+recordId = ifnull(recId,"").toString();
+if(recordId == "")
+{
+	return "no_record";
+}
+rec = Map();
+try
+{
+	rec = zoho.crm.getRecordById(moduleName,recordId.toLong());
+}
+catch (ge)
+{
+	rec = Map();
+}
+if(rec.isEmpty() || rec.get("id") == null)
+{
+	return "record_not_found";
+}
+fDocNum = "Rivhit_Document_Number";
+fDocType = "Rivhit_Document_Type";
+fSnap = "Rivhit_Issued_Snapshot";
+fDrift = "Rivhit_Record_Drift";
+fDriftAt = "Rivhit_Drift_Detected_At";
+fCur = "Rivhit_Currency_ID";
+for each  k in rec.keys()
+{
+	ks = k.toString();
+	if(ks.endsWith("Rivhit_Document_Number"))
+	{
+		fDocNum = ks;
+	}
+	else if(ks.endsWith("Rivhit_Document_Type"))
+	{
+		fDocType = ks;
+	}
+	else if(ks.endsWith("Rivhit_Issued_Snapshot"))
+	{
+		fSnap = ks;
+	}
+	else if(ks.endsWith("Rivhit_Record_Drift"))
+	{
+		fDrift = ks;
+	}
+	else if(ks.endsWith("Rivhit_Drift_Detected_At"))
+	{
+		fDriftAt = ks;
+	}
+	else if(ks.endsWith("Rivhit_Currency_ID"))
+	{
+		fCur = ks;
+	}
+}
+docNum = ifnull(rec.get(fDocNum),0).toLong();
+if(docNum == 0)
+{
+	// Belt and braces: the workflow condition should already prevent this, but
+	// without the guard the rule floods pre-issue records with notes.
+	return "not_issued";
+}
+snapRaw = ifnull(rec.get(fSnap),"").toString();
+if(snapRaw == "")
+{
+	return "no_snapshot";
+}
+oldSnap = Map();
+try
+{
+	oldSnap = snapRaw.toMap();
+}
+catch (se)
+{
+	oldSnap = Map();
+}
+if(oldSnap.isEmpty())
+{
+	return "unreadable_snapshot";
+}
+
+// ── Recompute the current snapshot the same way rv_issue_document did ──────
+curTotal = 0.0;
+curLines = List();
+lines = ifnull(rec.get("Product_Details"),List());
+for each  ln in lines
+{
+	prod = ifnull(ln.get("product"),Map());
+	qty = ifnull(ln.get("quantity"),1).toDecimal();
+	if(qty == 0)
+	{
+		qty = 1;
+	}
+	lp = ifnull(ln.get("list_price"),0).toDecimal();
+	disc = ifnull(ln.get("Discount"),0).toDecimal();
+	lineTotal = (lp * qty - disc).round(2);
+	desc = ifnull(ln.get("product_description"),"").toString();
+	if(desc == "")
+	{
+		desc = ifnull(prod.get("name"),"פריט").toString();
+	}
+	row = Map();
+	row.put("d",desc);
+	row.put("q",qty);
+	row.put("t",lineTotal);
+	curLines.add(row);
+	curTotal = curTotal + lineTotal;
+}
+curTotal = curTotal.round(2);
+curCurrency = ifnull(rec.get(fCur),1).toLong();
+custName = "";
+acct = ifnull(rec.get("Account_Name"),Map());
+if(!acct.isEmpty())
+{
+	custName = ifnull(acct.get("name"),"").toString();
+}
+
+// ── Diff ────────────────────────────────────────────────────────────────────
+oldTotal = ifnull(oldSnap.get("total"),0).toDecimal();
+oldCurrency = ifnull(oldSnap.get("currency"),1).toLong();
+oldLineCount = ifnull(oldSnap.get("lineCount"),0).toLong();
+oldCustomer = ifnull(oldSnap.get("customer"),"").toString();
+truncated = ifnull(oldSnap.get("truncated"),false);
+changes = List();
+if((curTotal - oldTotal).abs() > 0.001)
+{
+	changes.add("סכום: " + oldTotal + " ← " + curTotal);
+}
+if(curCurrency != oldCurrency)
+{
+	changes.add("מטבע: " + oldCurrency + " ← " + curCurrency);
+}
+if(curLines.size() != oldLineCount)
+{
+	changes.add("מספר שורות: " + oldLineCount + " ← " + curLines.size());
+}
+if(custName != "" && oldCustomer != "" && !custName.equalsIgnoreCase(oldCustomer))
+{
+	changes.add("לקוח: " + oldCustomer + " ← " + custName);
+}
+// Line-level detail, only when the full snapshot survived.
+if(!truncated && curLines.size() == oldLineCount)
+{
+	oldItems = ifnull(oldSnap.get("items"),List());
+	i = 0;
+	for each  ci in curLines
+	{
+		if(i < oldItems.size())
+		{
+			oi = oldItems.get(i);
+			oq = ifnull(oi.get("quantity"),0).toDecimal();
+			od = ifnull(oi.get("description"),"").toString();
+			cq = ifnull(ci.get("q"),0).toDecimal();
+			cd = ifnull(ci.get("d"),"").toString();
+			if((cq - oq).abs() > 0.001)
+			{
+				changes.add("שורה " + (i + 1) + " כמות: " + oq + " ← " + cq);
+			}
+			if(od != "" && cd != "" && !od.equalsIgnoreCase(cd))
+			{
+				changes.add("שורה " + (i + 1) + " תיאור: " + od + " ← " + cd);
+			}
+		}
+		i = i + 1;
+	}
+}
+if(changes.size() == 0)
+{
+	return "no_change";
+}
+
+// ── Who and when ────────────────────────────────────────────────────────────
+whoName = "משתמש לא ידוע";
+try
+{
+	who = zoho.crm.getRecordById("users",zoho.loginuserid);
+	whoName = ifnull(who.get("full_name"),ifnull(who.get("email"),whoName)).toString();
+}
+catch (we)
+{
+	whoName = "משתמש לא ידוע";
+}
+changeText = "";
+for each  c in changes
+{
+	changeText = changeText + "• " + c + "\n";
+}
+noteBody = "⚠ הרשומה שונתה לאחר שהמסמך הופק ברווחית." + "\n\n" + "המסמך ברווחית (" + rec.get(fDocType) + "/" + docNum + ") לא השתנה והוא הרשומה המשפטית הקובעת." + "\n\n" + "שינויים:" + "\n" + changeText + "\n" + "שונה על ידי: " + whoName + "\n" + "מועד: " + zoho.currenttime.toString("dd/MM/yyyy HH:mm");
+if(truncated)
+{
+	noteBody = noteBody + "\n" + "(תמונת המצב המקורית נשמרה מקוצרת — פירוט ברמת השורה אינו זמין)";
+}
+try
+{
+	nt = Map();
+	nt.put("Note_Title","רווחית — שינוי לאחר הפקת מסמך " + docNum);
+	nt.put("Note_Content",noteBody);
+	nt.put("Parent_Id",recordId);
+	nt.put("se_module",moduleName);
+	zoho.crm.createRecord("Notes",nt);
+	result = "noted";
+}
+catch (ne)
+{
+	info "rv_log_change: note creation failed for " + recordId + ": " + ne.toString();
+	result = "note_failed";
+}
+try
+{
+	u = Map();
+	u.put(fDrift,true);
+	u.put(fDriftAt,zoho.currenttime);
+	zoho.crm.updateRecord(moduleName,recordId.toLong(),u);
+}
+catch (ue)
+{
+	info "rv_log_change: drift flag write skipped for " + recordId;
+}
+return result;

@@ -1,0 +1,443 @@
+// ════════════════════════════════════════════════════════════════════════════
+//  rv_cancel_document  —  V1.0-r1  —  BILLABLE
+//  PASTE BODY ONLY. Category: REST API. Return: STRING. Argument: crmAPIRequest.
+//
+//  Document.Cancel produces the reversing credit document itself.
+//
+//  CRITICAL: an Invoice-Receipt (is_invoice_receipt = true) needs BOTH
+//  Document.Cancel AND Receipt.Cancel, each with the same number — one reverses
+//  the invoice half, the other the receipt half. Calling only one leaves the
+//  books half-reversed, which is why they are issued here as a single unit of
+//  work with a shared audit note.
+// ════════════════════════════════════════════════════════════════════════════
+
+prefix = "rivhitzohocrmextension__";
+out = Map();
+out.put("ok",false);
+out.put("code","init");
+out.put("message","");
+
+argsMap = Map();
+reqBody = crmAPIRequest.get("body");
+if(reqBody != null && reqBody.toString() != "" && reqBody.toString() != "null")
+{
+	try
+	{
+		cand = reqBody.toString().toMap();
+		if(cand.get("arguments") != null)
+		{
+			argsMap = cand.get("arguments").toString().toMap();
+		}
+		else
+		{
+			argsMap = cand;
+		}
+	}
+	catch (e)
+	{
+		argsMap = Map();
+	}
+}
+if(argsMap.get("recordId") == null)
+{
+	pr = crmAPIRequest.get("params");
+	if(pr != null)
+	{
+		try
+		{
+			pm = pr.toString().toMap();
+			if(pm.get("arguments") != null)
+			{
+				argsMap = pm.get("arguments").toString().toMap();
+			}
+			else
+			{
+				argsMap = pm;
+			}
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+if(argsMap.get("recordId") == null)
+{
+	ra = crmAPIRequest.get("arguments");
+	if(ra != null && ra.toString() != "")
+	{
+		try
+		{
+			argsMap = ra.toString().toMap();
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+moduleName = ifnull(argsMap.get("module"),"Invoices").toString();
+recordId = ifnull(argsMap.get("recordId"),"").toString();
+reason = ifnull(argsMap.get("reason"),"").toString();
+sendMail = ifnull(argsMap.get("sendMail"),false);
+if(recordId == "")
+{
+	out.put("code","bad_request");
+	out.put("message","חסר מזהה רשומה");
+	return out.toString();
+}
+apiToken = ifnull(zoho.crm.getOrgVariable(prefix + "API_Token"),"").toString();
+if(apiToken == "")
+{
+	out.put("code","not_configured");
+	out.put("message","ההרחבה טרם הוגדרה");
+	return out.toString();
+}
+baseUrl = "https://api.rivhit.co.il/online/RivhitOnlineAPI.svc/";
+defLang = ifnull(zoho.crm.getOrgVariable(prefix + "Default_Language"),"he").toString();
+typeCacheRaw = ifnull(zoho.crm.getOrgVariable(prefix + "Type_Cache"),"").toString();
+permsRaw = ifnull(zoho.crm.getOrgVariable(prefix + "Action_Permissions"),"").toString();
+if(permsRaw != "")
+{
+	allowed = true;
+	try
+	{
+		perms = permsRaw.toMap();
+		al = ifnull(perms.get("cancelDocument"),List());
+		if(al.size() > 0)
+		{
+			allowed = false;
+			me = zoho.crm.getRecordById("users",zoho.loginuserid);
+			mp = ifnull(me.get("profile"),Map());
+			mid = ifnull(mp.get("id"),"").toString();
+			mnm = ifnull(mp.get("name"),"").toString();
+			for each  p in al
+			{
+				if(p.toString() == mid || p.toString() == mnm)
+				{
+					allowed = true;
+				}
+			}
+		}
+	}
+	catch (pe)
+	{
+		allowed = true;
+	}
+	if(!allowed)
+	{
+		out.put("code","forbidden");
+		out.put("message","אין לך הרשאה לבטל מסמכים");
+		return out.toString();
+	}
+}
+rec = Map();
+try
+{
+	rec = zoho.crm.getRecordById(moduleName,recordId.toLong());
+}
+catch (re)
+{
+	rec = Map();
+}
+if(rec.isEmpty() || rec.get("id") == null)
+{
+	out.put("code","record_not_found");
+	out.put("message","הרשומה לא נמצאה");
+	return out.toString();
+}
+fDocNum = "Rivhit_Document_Number";
+fDocType = "Rivhit_Document_Type";
+fStatus = "Rivhit_Payment_Status";
+fCancelNum = "Rivhit_Cancel_Document_Number";
+fSync = "Rivhit_Last_Sync";
+fIsClosed = "Rivhit_Is_Closed";
+for each  k in rec.keys()
+{
+	ks = k.toString();
+	if(ks.endsWith("Rivhit_Document_Number"))
+	{
+		fDocNum = ks;
+	}
+	else if(ks.endsWith("Rivhit_Document_Type"))
+	{
+		fDocType = ks;
+	}
+	else if(ks.endsWith("Rivhit_Payment_Status"))
+	{
+		fStatus = ks;
+	}
+	else if(ks.endsWith("Rivhit_Cancel_Document_Number"))
+	{
+		fCancelNum = ks;
+	}
+	else if(ks.endsWith("Rivhit_Last_Sync"))
+	{
+		fSync = ks;
+	}
+	else if(ks.endsWith("Rivhit_Is_Closed"))
+	{
+		fIsClosed = ks;
+	}
+}
+docType = ifnull(rec.get(fDocType),0).toLong();
+docNum = ifnull(rec.get(fDocNum),0).toLong();
+if(docNum == 0)
+{
+	out.put("code","no_document");
+	out.put("message","אין מסמך לביטול");
+	return out.toString();
+}
+currentStatus = ifnull(rec.get(fStatus),"").toString();
+if(currentStatus == "Cancelled")
+{
+	out.put("code","already_cancelled");
+	out.put("message","המסמך כבר בוטל");
+	return out.toString();
+}
+
+// Does this type carry a receipt half?
+isInvoiceReceipt = false;
+typeLabel = "" + docType;
+if(typeCacheRaw != "")
+{
+	try
+	{
+		tc = typeCacheRaw.toMap();
+		for each  dt in ifnull(tc.get("documentTypes"),List())
+		{
+			if(ifnull(dt.get("document_type"),0).toLong() == docType)
+			{
+				isInvoiceReceipt = ifnull(dt.get("is_invoice_receipt"),false);
+				typeLabel = ifnull(dt.get("document_name"),typeLabel).toString();
+			}
+		}
+	}
+	catch (te)
+	{
+		isInvoiceReceipt = false;
+	}
+}
+if(reason.length() > 400)
+{
+	reason = reason.subString(0,400);
+}
+
+// ── Part 1 of the unit of work: cancel the document half ───────────────────
+docOk = false;
+docErr = "";
+cancelType = 0;
+cancelNumber = 0;
+cancelIdentity = "";
+cancelLink = "";
+reqRef = "zcrm:" + moduleName + ":" + recordId + ":cancel:" + zoho.currenttime.toString("yyyyMMddHHmmss");
+p1 = Map();
+p1.put("api_token",apiToken);
+p1.put("document_type",docType);
+p1.put("document_number",docNum);
+p1.put("language",defLang);
+p1.put("request_reference",reqRef);
+if(reason != "")
+{
+	p1.put("comments",reason);
+}
+try
+{
+	r1 = invokeurl
+	[
+		url :baseUrl + "Document.Cancel"
+		type :POST
+		parameters :p1.toString()
+		headers :{"Content-Type":"application/json"}
+	];
+	e1 = -9999;
+	try
+	{
+		e1 = ifnull(r1.get("error_code"),-9999).toLong();
+	}
+	catch (pa)
+	{
+		e1 = -9999;
+	}
+	if(e1 == 0)
+	{
+		docOk = true;
+		d1 = ifnull(r1.get("data"),Map());
+		cancelType = ifnull(d1.get("cancel_document_type"),0).toLong();
+		cancelNumber = ifnull(d1.get("cancel_document_number"),0).toLong();
+		cancelIdentity = ifnull(d1.get("cancel_document_identity"),"").toString();
+		cancelLink = ifnull(d1.get("cancel_document_link"),"").toString();
+	}
+	else if(e1 == -9999)
+	{
+		docErr = "תשובה לא קריאה מרווחית";
+	}
+	else
+	{
+		docErr = ifnull(r1.get("client_message"),"ביטול המסמך נכשל").toString();
+		info "rv_cancel_document Document.Cancel debug: " + ifnull(r1.get("debug_message"),"").toString();
+	}
+}
+catch (t1)
+{
+	docErr = "שגיאת תקשורת בביטול המסמך";
+	info "rv_cancel_document transport 1: " + t1.toString();
+}
+if(!docOk)
+{
+	out.put("code","cancel_failed");
+	out.put("message",docErr);
+	return out.toString();
+}
+
+// ── Part 2: for an Invoice-Receipt the receipt half must go too ────────────
+receiptOk = true;
+receiptErr = "";
+receiptCancelled = false;
+if(isInvoiceReceipt)
+{
+	receiptOk = false;
+	p2 = Map();
+	p2.put("api_token",apiToken);
+	p2.put("receipt_type",docType);
+	p2.put("receipt_number",docNum);
+	p2.put("language",defLang);
+	p2.put("request_reference",reqRef + ":rcpt");
+	try
+	{
+		r2 = invokeurl
+		[
+			url :baseUrl + "Receipt.Cancel"
+			type :POST
+			parameters :p2.toString()
+			headers :{"Content-Type":"application/json"}
+		];
+		e2 = -9999;
+		try
+		{
+			e2 = ifnull(r2.get("error_code"),-9999).toLong();
+		}
+		catch (pb)
+		{
+			e2 = -9999;
+		}
+		if(e2 == 0)
+		{
+			receiptOk = true;
+			receiptCancelled = true;
+		}
+		else if(e2 == -9999)
+		{
+			receiptErr = "תשובה לא קריאה בביטול חלק הקבלה";
+		}
+		else
+		{
+			receiptErr = ifnull(r2.get("client_message"),"ביטול חלק הקבלה נכשל").toString();
+			info "rv_cancel_document Receipt.Cancel debug: " + ifnull(r2.get("debug_message"),"").toString();
+		}
+	}
+	catch (t2)
+	{
+		receiptErr = "שגיאת תקשורת בביטול חלק הקבלה";
+		info "rv_cancel_document transport 2: " + t2.toString();
+	}
+}
+
+// ── Persist. A half-reversed state is reported loudly, never hidden. ───────
+upd = Map();
+upd.put(fStatus,"Cancelled");
+upd.put(fIsClosed,true);
+if(cancelNumber > 0)
+{
+	upd.put(fCancelNum,cancelNumber);
+}
+try
+{
+	zoho.crm.updateRecord(moduleName,recordId.toLong(),upd);
+}
+catch (ue)
+{
+	info "rv_cancel_document: CRM update failed: " + ue.toString();
+}
+try
+{
+	u2 = Map();
+	u2.put(fSync,zoho.currenttime);
+	zoho.crm.updateRecord(moduleName,recordId.toLong(),u2);
+}
+catch (ue2)
+{
+	info "rv_cancel_document: timestamp skipped";
+}
+noteBody = "בוטל מסמך ברווחית" + "\n" + "מסמך מקורי: " + typeLabel + " " + docType + "/" + docNum + "\n" + "מסמך מזכה שנוצר: " + cancelType + "/" + cancelNumber;
+if(isInvoiceReceipt)
+{
+	if(receiptCancelled)
+	{
+		noteBody = noteBody + "\n" + "חלק הקבלה בוטל אף הוא (Receipt.Cancel)";
+	}
+	else
+	{
+		noteBody = noteBody + "\n" + "⚠ חלק הקבלה לא בוטל: " + receiptErr + "\n" + "יש לבטל את הקבלה ידנית ברווחית — הספרים במצב ביטול חלקי.";
+	}
+}
+if(reason != "")
+{
+	noteBody = noteBody + "\n" + "סיבה: " + reason;
+}
+try
+{
+	nt = Map();
+	nt.put("Note_Title","רווחית — ביטול מסמך " + docNum);
+	nt.put("Note_Content",noteBody);
+	nt.put("Parent_Id",recordId);
+	nt.put("se_module",moduleName);
+	zoho.crm.createRecord("Notes",nt);
+}
+catch (ne)
+{
+	info "rv_cancel_document: note skipped";
+}
+try
+{
+	usageRaw = ifnull(zoho.crm.getOrgVariable(prefix + "Usage_Counter"),"").toString();
+	usage = Map();
+	if(usageRaw != "")
+	{
+		usage = usageRaw.toMap();
+	}
+	tm = zoho.currentdate.toString("yyyy-MM");
+	c0 = 0;
+	if(ifnull(usage.get("month"),"").toString() == tm)
+	{
+		c0 = ifnull(usage.get("count"),0).toLong();
+	}
+	usage.put("month",tm);
+	usage.put("count",c0 + 1);
+	zoho.crm.invokeConnector("crm.set",{"apiname":prefix + "Usage_Counter","value":usage.toString()});
+}
+catch (qe)
+{
+	info "rv_cancel_document: usage counter skipped";
+}
+d = Map();
+d.put("cancelDocumentType",cancelType);
+d.put("cancelDocumentNumber",cancelNumber);
+d.put("cancelDocumentIdentity",cancelIdentity);
+d.put("cancelDocumentUrl",cancelLink);
+d.put("wasInvoiceReceipt",isInvoiceReceipt);
+d.put("receiptCancelled",receiptCancelled);
+out.put("ok",true);
+if(isInvoiceReceipt && !receiptOk)
+{
+	out.put("code","partial_cancel");
+	out.put("message","המסמך בוטל אך חלק הקבלה לא — יש לבטל את הקבלה ידנית ברווחית");
+	d.put("receiptError",receiptErr);
+}
+else
+{
+	out.put("code","cancelled");
+	out.put("message","המסמך בוטל ונוצר מסמך מזכה");
+}
+out.put("data",d);
+return out.toString();

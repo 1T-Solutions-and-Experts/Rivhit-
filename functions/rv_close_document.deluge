@@ -1,0 +1,371 @@
+// ════════════════════════════════════════════════════════════════════════════
+//  rv_close_document  —  V1.0-r1  —  NOT billable
+//  PASTE BODY ONLY. Category: REST API. Return: STRING. Argument: crmAPIRequest.
+//
+//  Three modes, all through Document.Close:
+//    mode=manual  closing_type:0 / closing_number:0 / document_is_receipt:true
+//                 — settled entirely outside the system, no document produced
+//    mode=byDoc   closing_type/closing_number name an existing closing document
+//    mode=reopen  Document.Reopen reverses a close
+//  amount_close supports partial settlement in every mode.
+// ════════════════════════════════════════════════════════════════════════════
+
+prefix = "rivhitzohocrmextension__";
+out = Map();
+out.put("ok",false);
+out.put("code","init");
+out.put("message","");
+
+argsMap = Map();
+reqBody = crmAPIRequest.get("body");
+if(reqBody != null && reqBody.toString() != "" && reqBody.toString() != "null")
+{
+	try
+	{
+		cand = reqBody.toString().toMap();
+		if(cand.get("arguments") != null)
+		{
+			argsMap = cand.get("arguments").toString().toMap();
+		}
+		else
+		{
+			argsMap = cand;
+		}
+	}
+	catch (e)
+	{
+		argsMap = Map();
+	}
+}
+if(argsMap.get("recordId") == null)
+{
+	pr = crmAPIRequest.get("params");
+	if(pr != null)
+	{
+		try
+		{
+			pm = pr.toString().toMap();
+			if(pm.get("arguments") != null)
+			{
+				argsMap = pm.get("arguments").toString().toMap();
+			}
+			else
+			{
+				argsMap = pm;
+			}
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+if(argsMap.get("recordId") == null)
+{
+	ra = crmAPIRequest.get("arguments");
+	if(ra != null && ra.toString() != "")
+	{
+		try
+		{
+			argsMap = ra.toString().toMap();
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+moduleName = ifnull(argsMap.get("module"),"Invoices").toString();
+recordId = ifnull(argsMap.get("recordId"),"").toString();
+mode = ifnull(argsMap.get("mode"),"manual").toString();
+amountClose = ifnull(argsMap.get("amountClose"),0).toDecimal();
+closingType = ifnull(argsMap.get("closingType"),0).toLong();
+closingNumber = ifnull(argsMap.get("closingNumber"),0).toLong();
+closingDate = ifnull(argsMap.get("closingDate"),"").toString();
+if(recordId == "")
+{
+	out.put("code","bad_request");
+	out.put("message","חסר מזהה רשומה");
+	return out.toString();
+}
+apiToken = ifnull(zoho.crm.getOrgVariable(prefix + "API_Token"),"").toString();
+if(apiToken == "")
+{
+	out.put("code","not_configured");
+	out.put("message","ההרחבה טרם הוגדרה");
+	return out.toString();
+}
+baseUrl = "https://api.rivhit.co.il/online/RivhitOnlineAPI.svc/";
+permsRaw = ifnull(zoho.crm.getOrgVariable(prefix + "Action_Permissions"),"").toString();
+if(permsRaw != "")
+{
+	allowed = true;
+	try
+	{
+		perms = permsRaw.toMap();
+		al = ifnull(perms.get("closeDocument"),List());
+		if(al.size() > 0)
+		{
+			allowed = false;
+			me = zoho.crm.getRecordById("users",zoho.loginuserid);
+			mp = ifnull(me.get("profile"),Map());
+			mid = ifnull(mp.get("id"),"").toString();
+			mnm = ifnull(mp.get("name"),"").toString();
+			for each  p in al
+			{
+				if(p.toString() == mid || p.toString() == mnm)
+				{
+					allowed = true;
+				}
+			}
+		}
+	}
+	catch (pe)
+	{
+		allowed = true;
+	}
+	if(!allowed)
+	{
+		out.put("code","forbidden");
+		out.put("message","אין לך הרשאה לסגור מסמכים");
+		return out.toString();
+	}
+}
+rec = Map();
+try
+{
+	rec = zoho.crm.getRecordById(moduleName,recordId.toLong());
+}
+catch (re)
+{
+	rec = Map();
+}
+if(rec.isEmpty() || rec.get("id") == null)
+{
+	out.put("code","record_not_found");
+	out.put("message","הרשומה לא נמצאה");
+	return out.toString();
+}
+fDocNum = "Rivhit_Document_Number";
+fDocType = "Rivhit_Document_Type";
+fStatus = "Rivhit_Payment_Status";
+fPaid = "Rivhit_Paid_Amount";
+fPaidDate = "Rivhit_Paid_Date";
+fIsClosed = "Rivhit_Is_Closed";
+fSync = "Rivhit_Last_Sync";
+for each  k in rec.keys()
+{
+	ks = k.toString();
+	if(ks.endsWith("Rivhit_Document_Number"))
+	{
+		fDocNum = ks;
+	}
+	else if(ks.endsWith("Rivhit_Document_Type"))
+	{
+		fDocType = ks;
+	}
+	else if(ks.endsWith("Rivhit_Payment_Status"))
+	{
+		fStatus = ks;
+	}
+	else if(ks.endsWith("Rivhit_Paid_Amount"))
+	{
+		fPaid = ks;
+	}
+	else if(ks.endsWith("Rivhit_Paid_Date"))
+	{
+		fPaidDate = ks;
+	}
+	else if(ks.endsWith("Rivhit_Is_Closed"))
+	{
+		fIsClosed = ks;
+	}
+	else if(ks.endsWith("Rivhit_Last_Sync"))
+	{
+		fSync = ks;
+	}
+}
+docType = ifnull(rec.get(fDocType),0).toLong();
+docNum = ifnull(rec.get(fDocNum),0).toLong();
+if(docNum == 0)
+{
+	out.put("code","no_document");
+	out.put("message","טרם הופק מסמך ברווחית עבור רשומה זו");
+	return out.toString();
+}
+if(closingDate == "")
+{
+	closingDate = zoho.currentdate.toString("dd/MM/yyyy");
+}
+methodName = "Document.Close";
+payload = Map();
+payload.put("api_token",apiToken);
+payload.put("document_type",docType);
+payload.put("document_number",docNum);
+if(mode == "reopen")
+{
+	methodName = "Document.Reopen";
+}
+else if(mode == "manual")
+{
+	payload.put("closing_type",0);
+	payload.put("closing_number",0);
+	payload.put("document_is_receipt",true);
+	payload.put("closing_date",closingDate);
+	if(amountClose > 0)
+	{
+		payload.put("amount_close",amountClose.round(2));
+	}
+}
+else
+{
+	if(closingType == 0 || closingNumber == 0)
+	{
+		out.put("code","bad_request");
+		out.put("message","סגירה מול מסמך מחייבת סוג ומספר מסמך סוגר");
+		return out.toString();
+	}
+	payload.put("closing_type",closingType);
+	payload.put("closing_number",closingNumber);
+	payload.put("document_is_receipt",ifnull(argsMap.get("closingIsReceipt"),true));
+	payload.put("closing_date",closingDate);
+	if(amountClose > 0)
+	{
+		payload.put("amount_close",amountClose.round(2));
+	}
+}
+reqRef = "zcrm:" + moduleName + ":" + recordId + ":close:" + zoho.currenttime.toString("yyyyMMddHHmmss");
+payload.put("request_reference",reqRef);
+ok = false;
+errMsg = "";
+errCode = "";
+try
+{
+	rr = invokeurl
+	[
+		url :baseUrl + methodName
+		type :POST
+		parameters :payload.toString()
+		headers :{"Content-Type":"application/json"}
+	];
+	ec = -9999;
+	try
+	{
+		ec = ifnull(rr.get("error_code"),-9999).toLong();
+	}
+	catch (pe2)
+	{
+		ec = -9999;
+	}
+	if(ec == 0)
+	{
+		ok = true;
+	}
+	else if(ec == -9999)
+	{
+		errCode = "unparseable";
+		errMsg = "תשובה לא קריאה מרווחית";
+	}
+	else
+	{
+		errCode = "rivhit_" + ec;
+		errMsg = ifnull(rr.get("client_message"),"הפעולה נכשלה").toString();
+		info "rv_close_document debug: " + ifnull(rr.get("debug_message"),"").toString();
+	}
+}
+catch (te)
+{
+	errCode = "transport";
+	errMsg = "שגיאת תקשורת מול רווחית";
+	info "rv_close_document transport: " + te.toString();
+}
+if(!ok)
+{
+	out.put("code",errCode);
+	out.put("message",errMsg);
+	return out.toString();
+}
+docTotal = 0.0;
+try
+{
+	docTotal = ifnull(rec.get("Grand_Total"),ifnull(rec.get("Sub_Total"),0)).toDecimal();
+}
+catch (gte)
+{
+	docTotal = 0.0;
+}
+upd = Map();
+noteText = "";
+if(mode == "reopen")
+{
+	upd.put(fIsClosed,false);
+	upd.put(fStatus,"Issued");
+	upd.put(fPaid,0);
+	noteText = "המסמך נפתח מחדש ברווחית (Document.Reopen)";
+}
+else
+{
+	prevPaid = ifnull(rec.get(fPaid),0).toDecimal();
+	newPaid = prevPaid;
+	if(amountClose > 0)
+	{
+		newPaid = (prevPaid + amountClose).round(2);
+	}
+	else
+	{
+		newPaid = docTotal;
+	}
+	fully = (docTotal > 0 && newPaid >= docTotal - 0.01);
+	upd.put(fPaid,newPaid);
+	upd.put(fStatus,if(fully,"Paid","Partially Paid"));
+	upd.put(fIsClosed,fully);
+	upd.put(fPaidDate,zoho.currentdate.toString("yyyy-MM-dd"));
+	if(mode == "manual")
+	{
+		noteText = "המסמך נסגר ידנית ברווחית ללא מסמך סוגר" + "\n" + "סכום שנסגר: " + if(amountClose > 0,amountClose,docTotal);
+	}
+	else
+	{
+		noteText = "המסמך נסגר מול מסמך " + closingType + "/" + closingNumber + "\n" + "סכום שנסגר: " + if(amountClose > 0,amountClose,docTotal);
+	}
+}
+try
+{
+	zoho.crm.updateRecord(moduleName,recordId.toLong(),upd);
+}
+catch (ue)
+{
+	info "rv_close_document: CRM update failed: " + ue.toString();
+}
+try
+{
+	u2 = Map();
+	u2.put(fSync,zoho.currenttime);
+	zoho.crm.updateRecord(moduleName,recordId.toLong(),u2);
+}
+catch (ue2)
+{
+	info "rv_close_document: timestamp skipped";
+}
+try
+{
+	nt = Map();
+	nt.put("Note_Title","רווחית — " + if(mode == "reopen","פתיחת מסמך","סגירת מסמך") + " " + docNum);
+	nt.put("Note_Content",noteText + "\n" + "מסמך: " + docType + "/" + docNum);
+	nt.put("Parent_Id",recordId);
+	nt.put("se_module",moduleName);
+	zoho.crm.createRecord("Notes",nt);
+}
+catch (ne)
+{
+	info "rv_close_document: note skipped";
+}
+d = Map();
+d.put("mode",mode);
+d.put("documentType",docType);
+d.put("documentNumber",docNum);
+out.put("ok",true);
+out.put("code","ok");
+out.put("message",if(mode == "reopen","המסמך נפתח מחדש","המסמך נסגר"));
+out.put("data",d);
+return out.toString();

@@ -1,0 +1,608 @@
+// ════════════════════════════════════════════════════════════════════════════
+//  rv_icredit_ipn  —  V1.0-r1  —  PUBLIC ENDPOINT
+//  PASTE BODY ONLY. Category: REST API. Return: STRING. Argument: crmAPIRequest.
+//  Publish with a zapikey and paste the URL into iCredit as IPNURL.
+//
+//  iCredit requires a 200 OK within 1.25 SECONDS or it resends. A Zoho function's
+//  cold start alone can exceed that, so DUPLICATE DELIVERIES ARE NORMAL TRAFFIC,
+//  not an attack. Two consequences shape this whole function:
+//
+//   1. The replay guard is load-bearing for CORRECTNESS, not just security. It
+//      cannot be a read-then-write check — two concurrent deliveries would both
+//      read "not seen" and both proceed. Deluge has no locks, so the platform
+//      provides the mutex: ICredit_Sale_ID is a UNIQUE field on Rivhit_Receipts
+//      and claiming it is the first write. The loser of the race is rejected by
+//      the constraint and returns 200 OK having done nothing.
+//
+//   2. EVERY path returns a top-level value. A Deluge function that throws
+//      returns an error page to iCredit and guarantees a resend storm.
+//
+//  The vendor's reference listener leaves its security checks as // TODO
+//  comments. All four are implemented here: Verify, token match, replay, amount.
+// ════════════════════════════════════════════════════════════════════════════
+
+prefix = "rivhitzohocrmextension__";
+out = Map();
+out.put("ok",true);
+out.put("code","received");
+out.put("message","");
+
+// ── 1. Parse the IPN. iCredit POSTs form-encoded by default. ───────────────
+ipn = Map();
+rawBody = "";
+try
+{
+	rb = crmAPIRequest.get("body");
+	if(rb != null)
+	{
+		rawBody = rb.toString();
+	}
+}
+catch (be)
+{
+	rawBody = "";
+}
+if(rawBody != "" && rawBody != "null")
+{
+	try
+	{
+		ipn = rawBody.toMap();
+	}
+	catch (je)
+	{
+		ipn = Map();
+	}
+	if(ipn.isEmpty() && rawBody.contains("="))
+	{
+		for each  pair in rawBody.toList("&")
+		{
+			kv = pair.toList("=");
+			if(kv.size() >= 2)
+			{
+				kName = kv.get(0).toString();
+				kVal = kv.get(1).toString();
+				try
+				{
+					kVal = zoho.encryption.urlDecode(kVal);
+				}
+				catch (ue)
+				{
+					kVal = kVal;
+				}
+				ipn.put(kName,kVal);
+			}
+		}
+	}
+}
+if(ipn.get("SaleId") == null)
+{
+	try
+	{
+		pp = crmAPIRequest.get("params");
+		if(pp != null)
+		{
+			pm = pp.toString().toMap();
+			for each  pk in pm.keys()
+			{
+				ipn.put(pk,pm.get(pk));
+			}
+		}
+	}
+	catch (pe)
+	{
+		ipn = ipn;
+	}
+}
+saleId = ifnull(ipn.get("SaleId"),"").toString();
+if(saleId == "")
+{
+	out.put("code","no_sale_id");
+	out.put("message","IPN without SaleId — ignored");
+	info "rv_icredit_ipn: no SaleId. Raw: " + rawBody.subString(0,300);
+	return out.toString();
+}
+ipnToken = ifnull(ipn.get("GroupPrivateToken"),"").toString();
+txAmountStr = ifnull(ipn.get("TransactionAmount"),"0").toString();
+txAmount = 0.0;
+try
+{
+	txAmount = txAmountStr.toDecimal();
+}
+catch (ae)
+{
+	txAmount = 0.0;
+}
+custom1 = ifnull(ipn.get("Custom1"),"").toString();
+docNumIpn = ifnull(ipn.get("DocumentNum"),"").toString();
+docTypeIpn = ifnull(ipn.get("DocumentType"),"").toString();
+docUrlIpn = ifnull(ipn.get("DocumentURL"),"").toString();
+authNum = ifnull(ipn.get("TransactionAuthNum"),"").toString();
+cardNum = ifnull(ipn.get("TransactionCardNum"),"").toString();
+numPay = ifnull(ipn.get("TransactionNumOfPayment"),"1").toString();
+creditTerms = ifnull(ipn.get("TransactionCreditTerms"),"").toString();
+
+// ── 2. CLAIM THE SALE. This is the mutex — first write, before anything else.
+//      Rivhit_Receipts.ICredit_Sale_ID is a UNIQUE field; the second concurrent
+//      delivery is rejected by the platform and stops here. ─────────────────
+claimId = "";
+claimed = false;
+try
+{
+	claim = Map();
+	claim.put("Name","iCredit " + saleId.subString(0,8));
+	claim.put("ICredit_Sale_ID",saleId);
+	claim.put("Source","iCredit");
+	claim.put("Processing_State","Claimed");
+	cr = zoho.crm.createRecord("Rivhit_Receipts",claim);
+	claimId = ifnull(cr.get("id"),"").toString();
+	if(claimId != "")
+	{
+		claimed = true;
+	}
+}
+catch (cce)
+{
+	claimed = false;
+	info "rv_icredit_ipn: claim rejected for " + saleId + " (duplicate delivery or create error): " + cce.toString();
+}
+if(!claimed)
+{
+	out.put("code","duplicate");
+	out.put("message","Already processed or in flight — acknowledged");
+	return out.toString();
+}
+
+// From here on, failures must still return 200 OK and mark the claim, never throw.
+failState = "";
+failMsg = "";
+
+// ── 3. Settings ─────────────────────────────────────────────────────────────
+testMode = ifnull(zoho.crm.getOrgVariable(prefix + "ICredit_Test_Mode"),"true").toString() == "true";
+ourToken = "";
+if(testMode)
+{
+	ourToken = ifnull(zoho.crm.getOrgVariable(prefix + "ICredit_Group_Token_Test"),"").toString();
+}
+else
+{
+	ourToken = ifnull(zoho.crm.getOrgVariable(prefix + "ICredit_Group_Token_Prod"),"").toString();
+}
+icBase = "https://icredit.rivhit.co.il/API/PaymentPageRequest.svc/";
+if(testMode)
+{
+	icBase = "https://testicredit.rivhit.co.il/API/PaymentPageRequest.svc/";
+}
+icIssues = ifnull(zoho.crm.getOrgVariable(prefix + "ICredit_Issues_Document"),"true").toString() == "true";
+apiToken = ifnull(zoho.crm.getOrgVariable(prefix + "API_Token"),"").toString();
+rvBase = "https://api.rivhit.co.il/online/RivhitOnlineAPI.svc/";
+
+// ── CHECK 1: verify with iCredit itself ────────────────────────────────────
+verified = false;
+if(failState == "")
+{
+	try
+	{
+		vp = Map();
+		vp.put("GroupPrivateToken",ourToken);
+		vp.put("SaleId",saleId);
+		vp.put("TotalAmount",txAmount);
+		vr = invokeurl
+		[
+			url :icBase + "Verify"
+			type :POST
+			parameters :vp.toString()
+			headers :{"Content-Type":"application/json"}
+		];
+		vs = "";
+		try
+		{
+			vs = ifnull(vr.get("Status"),"").toString();
+		}
+		catch (vpe)
+		{
+			vs = "";
+		}
+		if(vs.equalsIgnoreCase("VERIFIED"))
+		{
+			verified = true;
+		}
+		else
+		{
+			failState = "not_verified";
+			failMsg = "iCredit Verify returned '" + vs + "'";
+		}
+	}
+	catch (ve)
+	{
+		failState = "verify_error";
+		failMsg = "Verify call failed: " + ve.toString();
+	}
+}
+
+// ── CHECK 2: the token in the IPN must be ours ─────────────────────────────
+if(failState == "" && ourToken != "" && ipnToken != "")
+{
+	if(!ipnToken.equalsIgnoreCase(ourToken))
+	{
+		failState = "token_mismatch";
+		failMsg = "GroupPrivateToken in the IPN does not match the configured token";
+	}
+}
+
+// ── Locate the record from Custom1 (Module:recordId) ───────────────────────
+moduleName = "";
+recordId = "";
+if(failState == "")
+{
+	if(custom1.contains(":"))
+	{
+		cparts = custom1.toList(":");
+		moduleName = cparts.get(0).toString();
+		recordId = cparts.get(1).toString();
+	}
+	else if(custom1 != "")
+	{
+		moduleName = "Invoices";
+		recordId = custom1;
+	}
+	if(recordId == "")
+	{
+		failState = "no_record";
+		failMsg = "Custom1 did not carry a CRM record id";
+	}
+}
+rec = Map();
+if(failState == "")
+{
+	try
+	{
+		rec = zoho.crm.getRecordById(moduleName,recordId.toLong());
+	}
+	catch (ge)
+	{
+		rec = Map();
+	}
+	if(rec.isEmpty() || rec.get("id") == null)
+	{
+		failState = "record_not_found";
+		failMsg = "CRM record " + custom1 + " not found";
+	}
+}
+fDocNum = "Rivhit_Document_Number";
+fDocType = "Rivhit_Document_Type";
+fDocUrl = "Rivhit_Document_URL";
+fStatus = "Rivhit_Payment_Status";
+fPaid = "Rivhit_Paid_Amount";
+fPaidDate = "Rivhit_Paid_Date";
+fIsClosed = "Rivhit_Is_Closed";
+fSaleId = "ICredit_Sale_ID";
+fAuth = "ICredit_Auth_Number";
+fLast4 = "ICredit_Card_Last4";
+fConfNum = "Rivhit_Confirmation_Number";
+fConfSt = "Rivhit_Confirmation_Status";
+fInstTotal = "Rivhit_Instalments_Total";
+fInstProg = "Rivhit_Instalment_Progress";
+fSync = "Rivhit_Last_Sync";
+if(!rec.isEmpty())
+{
+	for each  k in rec.keys()
+	{
+		ks = k.toString();
+		if(ks.endsWith("Rivhit_Document_Number"))
+		{
+			fDocNum = ks;
+		}
+		else if(ks.endsWith("Rivhit_Document_Type"))
+		{
+			fDocType = ks;
+		}
+		else if(ks.endsWith("Rivhit_Document_URL"))
+		{
+			fDocUrl = ks;
+		}
+		else if(ks.endsWith("Rivhit_Payment_Status"))
+		{
+			fStatus = ks;
+		}
+		else if(ks.endsWith("Rivhit_Paid_Amount"))
+		{
+			fPaid = ks;
+		}
+		else if(ks.endsWith("Rivhit_Paid_Date"))
+		{
+			fPaidDate = ks;
+		}
+		else if(ks.endsWith("Rivhit_Is_Closed"))
+		{
+			fIsClosed = ks;
+		}
+		else if(ks.endsWith("ICredit_Sale_ID"))
+		{
+			fSaleId = ks;
+		}
+		else if(ks.endsWith("ICredit_Auth_Number"))
+		{
+			fAuth = ks;
+		}
+		else if(ks.endsWith("ICredit_Card_Last4"))
+		{
+			fLast4 = ks;
+		}
+		else if(ks.endsWith("Rivhit_Confirmation_Number"))
+		{
+			fConfNum = ks;
+		}
+		else if(ks.endsWith("Rivhit_Confirmation_Status"))
+		{
+			fConfSt = ks;
+		}
+		else if(ks.endsWith("Rivhit_Instalments_Total"))
+		{
+			fInstTotal = ks;
+		}
+		else if(ks.endsWith("Rivhit_Instalment_Progress"))
+		{
+			fInstProg = ks;
+		}
+		else if(ks.endsWith("Rivhit_Last_Sync"))
+		{
+			fSync = ks;
+		}
+	}
+}
+
+// ── CHECK 3 (secondary): the record must not already carry this SaleId ─────
+if(failState == "")
+{
+	prevSale = ifnull(rec.get(fSaleId),"").toString();
+	if(prevSale != "" && prevSale.equalsIgnoreCase(saleId))
+	{
+		failState = "already_applied";
+		failMsg = "This SaleId is already recorded on the CRM record";
+	}
+}
+
+// ── CHECK 4: the amount must match the record ──────────────────────────────
+if(failState == "")
+{
+	expected = 0.0;
+	try
+	{
+		expected = ifnull(rec.get("Grand_Total"),ifnull(rec.get("Sub_Total"),0)).toDecimal();
+	}
+	catch (ee)
+	{
+		expected = 0.0;
+	}
+	if(expected > 0)
+	{
+		diff = expected - txAmount;
+		if(diff < 0)
+		{
+			diff = diff * -1;
+		}
+		if(diff > 0.01)
+		{
+			failState = "amount_mismatch";
+			failMsg = "Charged " + txAmount + " but the record total is " + expected;
+		}
+	}
+}
+
+// ── All checks failed → record it and stop. The invoice is never touched. ──
+if(failState != "")
+{
+	try
+	{
+		fu = Map();
+		fu.put("Processing_State","Rejected");
+		fu.put("Rejection_Reason",failState + ": " + failMsg);
+		zoho.crm.updateRecord("Rivhit_Receipts",claimId.toLong(),fu);
+	}
+	catch (fue)
+	{
+		info "rv_icredit_ipn: could not mark the claim rejected";
+	}
+	info "rv_icredit_ipn REJECTED " + saleId + " — " + failState + ": " + failMsg;
+	out.put("code",failState);
+	out.put("message",failMsg);
+	return out.toString();
+}
+
+// ── All four passed. Apply. ────────────────────────────────────────────────
+last4 = "";
+if(cardNum.length() >= 4)
+{
+	last4 = cardNum.right(4);
+}
+instTotal = 1;
+try
+{
+	instTotal = numPay.toLong();
+}
+catch (ne2)
+{
+	instTotal = 1;
+}
+if(instTotal < 1)
+{
+	instTotal = 1;
+}
+confNum = "";
+docNumFinal = 0;
+docTypeFinal = 0;
+mode = "";
+if(icIssues)
+{
+	// iCredit issued the document. Record it, then resolve the allocation number
+	// via Document.Details — the IPN does not carry it.
+	mode = "icredit_issued";
+	try
+	{
+		docNumFinal = docNumIpn.toLong();
+	}
+	catch (dx)
+	{
+		docNumFinal = 0;
+	}
+	try
+	{
+		docTypeFinal = docTypeIpn.toLong();
+	}
+	catch (dy)
+	{
+		docTypeFinal = 0;
+	}
+	if(docNumFinal > 0 && docTypeFinal > 0 && apiToken != "")
+	{
+		try
+		{
+			dp = Map();
+			dp.put("api_token",apiToken);
+			dp.put("document_type",docTypeFinal);
+			dp.put("document_number",docNumFinal);
+			dr = invokeurl
+			[
+				url :rvBase + "Document.Details"
+				type :POST
+				parameters :dp.toString()
+				headers :{"Content-Type":"application/json"}
+			];
+			dec = -9999;
+			try
+			{
+				dec = ifnull(dr.get("error_code"),-9999).toLong();
+			}
+			catch (dpe)
+			{
+				dec = -9999;
+			}
+			if(dec == 0)
+			{
+				dd = ifnull(dr.get("data"),Map());
+				confNum = ifnull(dd.get("confirmation_number"),"").toString();
+				payRows = ifnull(dd.get("payments"),List());
+				if(payRows.size() > instTotal)
+				{
+					instTotal = payRows.size();
+				}
+			}
+		}
+		catch (dte)
+		{
+			info "rv_icredit_ipn: Document.Details lookup failed: " + dte.toString();
+		}
+	}
+	if(docNumFinal == 0)
+	{
+		// The setting says iCredit issues, but no document came back. That is a
+		// misconfiguration worth surfacing, not swallowing.
+		info "rv_icredit_ipn: ICredit_Issues_Document is true but the IPN carried no DocumentNum for " + saleId;
+	}
+}
+else
+{
+	mode = "extension_issues";
+}
+upd = Map();
+upd.put(fSaleId,saleId);
+upd.put(fStatus,"Paid");
+upd.put(fPaid,txAmount);
+upd.put(fPaidDate,zoho.currentdate.toString("yyyy-MM-dd"));
+upd.put(fIsClosed,true);
+if(authNum != "")
+{
+	upd.put(fAuth,authNum);
+}
+if(last4 != "")
+{
+	upd.put(fLast4,last4);
+}
+if(docNumFinal > 0)
+{
+	upd.put(fDocNum,docNumFinal);
+	upd.put(fDocType,docTypeFinal);
+	if(docUrlIpn != "")
+	{
+		upd.put(fDocUrl,docUrlIpn);
+	}
+}
+if(confNum != "" && confNum != "0")
+{
+	upd.put(fConfNum,confNum);
+	upd.put(fConfSt,"Obtained");
+}
+crmOk = true;
+try
+{
+	zoho.crm.updateRecord(moduleName,recordId.toLong(),upd);
+}
+catch (ue)
+{
+	crmOk = false;
+	info "rv_icredit_ipn: CRM update failed for " + custom1 + ": " + ue.toString();
+}
+// Instalments: payment status stays Paid — only the cash is staged.
+try
+{
+	u2 = Map();
+	u2.put(fInstTotal,instTotal);
+	u2.put(fInstProg,"1/" + instTotal);
+	u2.put(fSync,zoho.currenttime);
+	zoho.crm.updateRecord(moduleName,recordId.toLong(),u2);
+}
+catch (ue2)
+{
+	info "rv_icredit_ipn: instalment fields skipped";
+}
+// Fill in the claim row we created at the top.
+try
+{
+	fu2 = Map();
+	fu2.put("Name","iCredit " + if(docNumFinal > 0,docNumFinal.toString(),saleId.subString(0,8)));
+	fu2.put("Processing_State","Applied");
+	fu2.put("Receipt_Amount",txAmount);
+	fu2.put("Receipt_Date",zoho.currentdate.toString("yyyy-MM-dd"));
+	fu2.put("Payment_Method","כרטיס אשראי");
+	if(docNumFinal > 0)
+	{
+		fu2.put("Receipt_Number",docNumFinal);
+		fu2.put("Closed_Document_Type",docTypeFinal);
+		fu2.put("Closed_Document_Number",docNumFinal);
+	}
+	if(docUrlIpn != "")
+	{
+		fu2.put("Receipt_URL",docUrlIpn);
+	}
+	if(moduleName == "Invoices")
+	{
+		fu2.put("Invoice",recordId);
+	}
+	zoho.crm.updateRecord("Rivhit_Receipts",claimId.toLong(),fu2);
+}
+catch (fue2)
+{
+	info "rv_icredit_ipn: could not complete the receipt row";
+}
+try
+{
+	nt = Map();
+	nt.put("Note_Title","iCredit — תשלום התקבל");
+	nt.put("Note_Content","התקבל תשלום בכרטיס אשראי" + "\n" + "SaleId: " + saleId + "\n" + "סכום: " + txAmount + "\n" + "אישור: " + authNum + "\n" + "4 ספרות: " + last4 + "\n" + "תשלומים: " + instTotal + "\n" + "מפיק המסמך: " + if(icIssues,"iCredit","ההרחבה") + "\n" + "מסמך: " + docTypeFinal + "/" + docNumFinal + "\n" + "מספר הקצאה: " + if(confNum == "","—",confNum));
+	nt.put("Parent_Id",recordId);
+	nt.put("se_module",moduleName);
+	zoho.crm.createRecord("Notes",nt);
+}
+catch (ne3)
+{
+	info "rv_icredit_ipn: note skipped";
+}
+out.put("code","applied");
+out.put("message","OK");
+d = Map();
+d.put("saleId",saleId);
+d.put("mode",mode);
+d.put("documentNumber",docNumFinal);
+d.put("crmUpdated",crmOk);
+out.put("data",d);
+return out.toString();

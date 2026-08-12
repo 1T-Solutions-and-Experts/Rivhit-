@@ -1,0 +1,444 @@
+// ════════════════════════════════════════════════════════════════════════════
+//  rv_sync_products  —  V1.0-r1  —  NOT billable
+//  PASTE BODY ONLY. Category: REST API. Return: STRING. Argument: crmAPIRequest.
+//
+//  Ladder per product: stored Rivhit_Item_ID → catalog number match → create.
+//  Batched with a caller-driven cursor because Zoho caps invokeurl calls per
+//  function execution; the widget re-invokes with `remaining` until it empties.
+// ════════════════════════════════════════════════════════════════════════════
+
+prefix = "rivhitzohocrmextension__";
+out = Map();
+out.put("ok",false);
+out.put("code","init");
+out.put("message","");
+
+argsMap = Map();
+reqBody = crmAPIRequest.get("body");
+if(reqBody != null && reqBody.toString() != "" && reqBody.toString() != "null")
+{
+	try
+	{
+		cand = reqBody.toString().toMap();
+		if(cand.get("arguments") != null)
+		{
+			argsMap = cand.get("arguments").toString().toMap();
+		}
+		else
+		{
+			argsMap = cand;
+		}
+	}
+	catch (e)
+	{
+		argsMap = Map();
+	}
+}
+if(argsMap.get("ids") == null)
+{
+	pr = crmAPIRequest.get("params");
+	if(pr != null)
+	{
+		try
+		{
+			pm = pr.toString().toMap();
+			if(pm.get("arguments") != null)
+			{
+				argsMap = pm.get("arguments").toString().toMap();
+			}
+			else
+			{
+				argsMap = pm;
+			}
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+if(argsMap.get("ids") == null)
+{
+	ra = crmAPIRequest.get("arguments");
+	if(ra != null && ra.toString() != "")
+	{
+		try
+		{
+			argsMap = ra.toString().toMap();
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+ids = ifnull(argsMap.get("ids"),List());
+pullStock = ifnull(argsMap.get("pullStock"),false);
+batchSize = ifnull(argsMap.get("batchSize"),12).toLong();
+if(batchSize > 20)
+{
+	batchSize = 20;
+}
+if(ids.size() == 0)
+{
+	out.put("code","bad_request");
+	out.put("message","לא נבחרו פריטים");
+	return out.toString();
+}
+apiToken = ifnull(zoho.crm.getOrgVariable(prefix + "API_Token"),"").toString();
+if(apiToken == "")
+{
+	out.put("code","not_configured");
+	out.put("message","ההרחבה טרם הוגדרה");
+	return out.toString();
+}
+baseUrl = "https://api.rivhit.co.il/online/RivhitOnlineAPI.svc/";
+permsRaw = ifnull(zoho.crm.getOrgVariable(prefix + "Action_Permissions"),"").toString();
+if(permsRaw != "")
+{
+	allowed = true;
+	try
+	{
+		perms = permsRaw.toMap();
+		al = ifnull(perms.get("syncProducts"),List());
+		if(al.size() > 0)
+		{
+			allowed = false;
+			me = zoho.crm.getRecordById("users",zoho.loginuserid);
+			mp = ifnull(me.get("profile"),Map());
+			mid = ifnull(mp.get("id"),"").toString();
+			mnm = ifnull(mp.get("name"),"").toString();
+			for each  p in al
+			{
+				if(p.toString() == mid || p.toString() == mnm)
+				{
+					allowed = true;
+				}
+			}
+		}
+	}
+	catch (pe)
+	{
+		allowed = true;
+	}
+	if(!allowed)
+	{
+		out.put("code","forbidden");
+		out.put("message","אין לך הרשאה לסנכרן פריטים");
+		return out.toString();
+	}
+}
+created = 0;
+updated = 0;
+failed = 0;
+processed = 0;
+results = List();
+remaining = List();
+idx = 0;
+for each  pid in ids
+{
+	idx = idx + 1;
+	if(idx > batchSize)
+	{
+		remaining.add(pid);
+	}
+	else
+	{
+		processed = processed + 1;
+		row = Map();
+		row.put("id",pid.toString());
+		pRec = Map();
+		try
+		{
+			pRec = zoho.crm.getRecordById("Products",pid.toLong());
+		}
+		catch (ge)
+		{
+			pRec = Map();
+		}
+		if(pRec.isEmpty() || pRec.get("id") == null)
+		{
+			failed = failed + 1;
+			row.put("status","not_found");
+			results.add(row);
+		}
+		else
+		{
+			fItemId = "Rivhit_Item_ID";
+			fCatalog = "Rivhit_Catalog_Number";
+			fGroup = "Rivhit_Item_Group_ID";
+			fStorage = "Rivhit_Storage_ID";
+			fQty = "Rivhit_Quantity_On_Hand";
+			fQtyUpd = "Rivhit_Quantity_Updated";
+			for each  k in pRec.keys()
+			{
+				ks = k.toString();
+				if(ks.endsWith("Rivhit_Item_ID"))
+				{
+					fItemId = ks;
+				}
+				else if(ks.endsWith("Rivhit_Catalog_Number"))
+				{
+					fCatalog = ks;
+				}
+				else if(ks.endsWith("Rivhit_Item_Group_ID"))
+				{
+					fGroup = ks;
+				}
+				else if(ks.endsWith("Rivhit_Storage_ID"))
+				{
+					fStorage = ks;
+				}
+				else if(ks.endsWith("Rivhit_Quantity_On_Hand"))
+				{
+					fQty = ks;
+				}
+				else if(ks.endsWith("Rivhit_Quantity_Updated"))
+				{
+					fQtyUpd = ks;
+				}
+			}
+			itemId = ifnull(pRec.get(fItemId),0).toLong();
+			catalog = ifnull(pRec.get(fCatalog),"").toString();
+			if(catalog == "")
+			{
+				catalog = ifnull(pRec.get("Product_Code"),"").toString();
+			}
+			if(catalog.length() > 15)
+			{
+				catalog = catalog.subString(0,15);
+			}
+			pname = ifnull(pRec.get("Product_Name"),"").toString();
+			if(pname == "")
+			{
+				pname = "פריט " + pid.toString().right(6);
+			}
+			if(pname.length() > 100)
+			{
+				pname = pname.subString(0,100);
+			}
+			salePrice = ifnull(pRec.get("Unit_Price"),0).toDecimal();
+			groupId = ifnull(pRec.get(fGroup),0).toLong();
+			storageId = ifnull(pRec.get(fStorage),0).toLong();
+			// rung 2 — match on catalog number when no id is stored
+			if(itemId == 0 && catalog != "")
+			{
+				try
+				{
+					lp = Map();
+					lp.put("api_token",apiToken);
+					lr = invokeurl
+					[
+						url :baseUrl + "Item.List"
+						type :POST
+						parameters :lp.toString()
+						headers :{"Content-Type":"application/json"}
+					];
+					lec = -9999;
+					try
+					{
+						lec = ifnull(lr.get("error_code"),-9999).toLong();
+					}
+					catch (lpe)
+					{
+						lec = -9999;
+					}
+					if(lec == 0)
+					{
+						ld = ifnull(lr.get("data"),Map());
+						for each  it in ifnull(ld.get("item_list"),List())
+						{
+							if(itemId == 0)
+							{
+								pn = ifnull(it.get("item_part_num"),"").toString();
+								if(pn != "" && pn.equalsIgnoreCase(catalog))
+								{
+									itemId = ifnull(it.get("item_id"),0).toLong();
+								}
+							}
+						}
+					}
+				}
+				catch (le)
+				{
+					info "rv_sync_products: Item.List lookup failed: " + le.toString();
+				}
+			}
+			body = Map();
+			body.put("api_token",apiToken);
+			body.put("item_name",pname);
+			if(catalog != "")
+			{
+				body.put("item_part_num",catalog);
+			}
+			if(salePrice > 0)
+			{
+				body.put("sale_nis",salePrice.round(2));
+			}
+			if(groupId > 0)
+			{
+				body.put("item_group_id",groupId);
+			}
+			if(storageId > 0)
+			{
+				body.put("storage_id",storageId);
+			}
+			methodName = "Item.New";
+			if(itemId > 0)
+			{
+				methodName = "Item.Update";
+				body.put("item_id",itemId);
+			}
+			body.put("request_reference","zcrm:Products:" + pid + ":item:" + zoho.currenttime.toString("yyyyMMddHH"));
+			wOk = false;
+			wErr = "";
+			newItemId = itemId;
+			try
+			{
+				wr = invokeurl
+				[
+					url :baseUrl + methodName
+					type :POST
+					parameters :body.toString()
+					headers :{"Content-Type":"application/json"}
+				];
+				wec = -9999;
+				try
+				{
+					wec = ifnull(wr.get("error_code"),-9999).toLong();
+				}
+				catch (wp)
+				{
+					wec = -9999;
+				}
+				if(wec == 0)
+				{
+					wOk = true;
+					wd = ifnull(wr.get("data"),Map());
+					if(methodName == "Item.New")
+					{
+						newItemId = ifnull(wd.get("item_id"),0).toLong();
+						created = created + 1;
+					}
+					else
+					{
+						updated = updated + 1;
+					}
+				}
+				else if(wec == -9999)
+				{
+					wErr = "תשובה לא קריאה מרווחית";
+				}
+				else
+				{
+					wErr = ifnull(wr.get("client_message"),"פעולה נכשלה").toString();
+					info "rv_sync_products debug " + pid + ": " + ifnull(wr.get("debug_message"),"").toString();
+				}
+			}
+			catch (wt)
+			{
+				wErr = "שגיאת תקשורת";
+			}
+			onHand = 0.0;
+			if(wOk && pullStock && newItemId > 0)
+			{
+				try
+				{
+					qp = Map();
+					qp.put("api_token",apiToken);
+					qp.put("item_id",newItemId);
+					if(storageId > 0)
+					{
+						qp.put("storage_id",storageId);
+					}
+					qr = invokeurl
+					[
+						url :baseUrl + "Item.Quantity"
+						type :POST
+						parameters :qp.toString()
+						headers :{"Content-Type":"application/json"}
+					];
+					qec = -9999;
+					try
+					{
+						qec = ifnull(qr.get("error_code"),-9999).toLong();
+					}
+					catch (qp2)
+					{
+						qec = -9999;
+					}
+					if(qec == 0)
+					{
+						qd = ifnull(qr.get("data"),Map());
+						onHand = ifnull(qd.get("quantity"),0).toDecimal();
+					}
+				}
+				catch (qe)
+				{
+					info "rv_sync_products: Item.Quantity failed for " + newItemId;
+				}
+			}
+			if(wOk)
+			{
+				try
+				{
+					pu = Map();
+					pu.put(fItemId,newItemId);
+					if(catalog != "")
+					{
+						pu.put(fCatalog,catalog);
+					}
+					if(pullStock)
+					{
+						pu.put(fQty,onHand);
+					}
+					zoho.crm.updateRecord("Products",pid.toLong(),pu);
+				}
+				catch (pue)
+				{
+					info "rv_sync_products: CRM write failed for " + pid;
+				}
+				if(pullStock)
+				{
+					try
+					{
+						pu2 = Map();
+						pu2.put(fQtyUpd,zoho.currenttime);
+						zoho.crm.updateRecord("Products",pid.toLong(),pu2);
+					}
+					catch (pue2)
+					{
+						info "rv_sync_products: stock timestamp skipped";
+					}
+				}
+				row.put("status",if(methodName == "Item.New","created","updated"));
+				row.put("itemId",newItemId);
+				if(pullStock)
+				{
+					row.put("onHand",onHand);
+				}
+			}
+			else
+			{
+				failed = failed + 1;
+				row.put("status","failed");
+				row.put("error",wErr);
+			}
+			row.put("name",pname);
+			results.add(row);
+		}
+	}
+}
+d = Map();
+d.put("processed",processed);
+d.put("created",created);
+d.put("updated",updated);
+d.put("failed",failed);
+d.put("remaining",remaining);
+d.put("remainingCount",remaining.size());
+d.put("results",results);
+out.put("ok",true);
+out.put("code",if(remaining.size() > 0,"partial","done"));
+out.put("message","עובדו " + processed + " פריטים" + if(remaining.size() > 0," — נותרו " + remaining.size(),""));
+out.put("data",d);
+return out.toString();

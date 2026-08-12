@@ -1,0 +1,136 @@
+// ════════════════════════════════════════════════════════════════════════════
+//  rv_icredit_ipn_failure  —  V1.0-r1  —  PUBLIC ENDPOINT
+//  PASTE BODY ONLY. Category: REST API. Return: STRING. Argument: crmAPIRequest.
+//  Publish with a zapikey and paste the URL into iCredit as IPNFailureURL.
+//
+//  Why this exists as a separate endpoint: left unset, iCredit sends failure
+//  notifications to the SUCCESS url, once per failed charge attempt. A customer
+//  mistyping a card three times would arrive as three events at the handler that
+//  marks invoices paid. Splitting them keeps the success path clean.
+//
+//  This endpoint records the attempt on the record's audit trail and changes
+//  NOTHING else. A declined card is not a payment.
+// ════════════════════════════════════════════════════════════════════════════
+
+out = Map();
+out.put("ok",true);
+out.put("code","received");
+out.put("message","");
+
+ipn = Map();
+rawBody = "";
+try
+{
+	rb = crmAPIRequest.get("body");
+	if(rb != null)
+	{
+		rawBody = rb.toString();
+	}
+}
+catch (be)
+{
+	rawBody = "";
+}
+if(rawBody != "" && rawBody != "null")
+{
+	try
+	{
+		ipn = rawBody.toMap();
+	}
+	catch (je)
+	{
+		ipn = Map();
+	}
+	if(ipn.isEmpty() && rawBody.contains("="))
+	{
+		for each  pair in rawBody.toList("&")
+		{
+			kv = pair.toList("=");
+			if(kv.size() >= 2)
+			{
+				kn = kv.get(0).toString();
+				kvv = kv.get(1).toString();
+				try
+				{
+					kvv = zoho.encryption.urlDecode(kvv);
+				}
+				catch (ue)
+				{
+					kvv = kvv;
+				}
+				ipn.put(kn,kvv);
+			}
+		}
+	}
+}
+if(ipn.get("Custom1") == null)
+{
+	try
+	{
+		pp = crmAPIRequest.get("params");
+		if(pp != null)
+		{
+			pm = pp.toString().toMap();
+			for each  pk in pm.keys()
+			{
+				ipn.put(pk,pm.get(pk));
+			}
+		}
+	}
+	catch (pe)
+	{
+		ipn = ipn;
+	}
+}
+custom1 = ifnull(ipn.get("Custom1"),"").toString();
+saleId = ifnull(ipn.get("SaleId"),"").toString();
+amount = ifnull(ipn.get("TransactionAmount"),"").toString();
+errText = ifnull(ipn.get("TransactionTypeDescription"),"").toString();
+if(errText == "")
+{
+	errText = ifnull(ipn.get("DebugMessage"),"").toString();
+}
+if(errText == "")
+{
+	errText = ifnull(ipn.get("TransactionStatus"),"").toString();
+}
+cardName = ifnull(ipn.get("TransactionCardName"),"").toString();
+if(custom1 == "")
+{
+	info "rv_icredit_ipn_failure: no Custom1, nothing to attach to. Raw: " + rawBody.subString(0,300);
+	out.put("code","no_record");
+	out.put("message","OK");
+	return out.toString();
+}
+moduleName = "Invoices";
+recordId = custom1;
+if(custom1.contains(":"))
+{
+	parts = custom1.toList(":");
+	moduleName = parts.get(0).toString();
+	recordId = parts.get(1).toString();
+}
+noted = false;
+try
+{
+	nt = Map();
+	nt.put("Note_Title","iCredit — ניסיון תשלום נכשל");
+	nt.put("Note_Content","ניסיון חיוב בכרטיס אשראי נכשל. לא בוצע שינוי בסטטוס התשלום." + "\n" + "SaleId: " + if(saleId == "","—",saleId) + "\n" + "סכום: " + if(amount == "","—",amount) + "\n" + "כרטיס: " + if(cardName == "","—",cardName) + "\n" + "סיבה: " + if(errText == "","לא צוינה",errText) + "\n" + "מועד: " + zoho.currenttime.toString("dd/MM/yyyy HH:mm"));
+	nt.put("Parent_Id",recordId);
+	nt.put("se_module",moduleName);
+	zoho.crm.createRecord("Notes",nt);
+	noted = true;
+}
+catch (ne)
+{
+	info "rv_icredit_ipn_failure: note failed for " + custom1 + ": " + ne.toString();
+}
+info "rv_icredit_ipn_failure: declined charge on " + custom1 + " (SaleId " + saleId + "): " + errText;
+d = Map();
+d.put("record",custom1);
+d.put("saleId",saleId);
+d.put("noted",noted);
+out.put("code","logged");
+out.put("message","OK");
+out.put("data",d);
+return out.toString();

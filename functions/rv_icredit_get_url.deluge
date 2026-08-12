@@ -1,0 +1,506 @@
+// ════════════════════════════════════════════════════════════════════════════
+//  rv_icredit_get_url  —  V1.0-r1  —  NOT billable by Rivhit
+//  PASTE BODY ONLY. Category: REST API. Return: STRING. Argument: crmAPIRequest.
+//
+//  GetUrl is the right method for a CRM widget: the hosted page carries PCI
+//  compliance, which a widget collecting card numbers never could. ChargeSimple
+//  is for locally installed applications and is deliberately out of scope.
+//
+//  Custom1 carries "Module:recordId" — the correlation key that comes back in the
+//  IPN. It is unbounded, so the full Zoho id fits with room for the prefix.
+// ════════════════════════════════════════════════════════════════════════════
+
+prefix = "rivhitzohocrmextension__";
+out = Map();
+out.put("ok",false);
+out.put("code","init");
+out.put("message","");
+
+argsMap = Map();
+reqBody = crmAPIRequest.get("body");
+if(reqBody != null && reqBody.toString() != "" && reqBody.toString() != "null")
+{
+	try
+	{
+		cand = reqBody.toString().toMap();
+		if(cand.get("arguments") != null)
+		{
+			argsMap = cand.get("arguments").toString().toMap();
+		}
+		else
+		{
+			argsMap = cand;
+		}
+	}
+	catch (e)
+	{
+		argsMap = Map();
+	}
+}
+if(argsMap.get("recordId") == null)
+{
+	pr = crmAPIRequest.get("params");
+	if(pr != null)
+	{
+		try
+		{
+			pm = pr.toString().toMap();
+			if(pm.get("arguments") != null)
+			{
+				argsMap = pm.get("arguments").toString().toMap();
+			}
+			else
+			{
+				argsMap = pm;
+			}
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+if(argsMap.get("recordId") == null)
+{
+	ra = crmAPIRequest.get("arguments");
+	if(ra != null && ra.toString() != "")
+	{
+		try
+		{
+			argsMap = ra.toString().toMap();
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+moduleName = ifnull(argsMap.get("module"),"Invoices").toString();
+recordId = ifnull(argsMap.get("recordId"),"").toString();
+maxPayments = ifnull(argsMap.get("maxPayments"),1).toLong();
+overrideAmount = ifnull(argsMap.get("amount"),0).toDecimal();
+if(recordId == "")
+{
+	out.put("code","bad_request");
+	out.put("message","חסר מזהה רשומה");
+	return out.toString();
+}
+icEnabled = ifnull(zoho.crm.getOrgVariable(prefix + "ICredit_Enabled"),"false").toString() == "true";
+if(!icEnabled)
+{
+	out.put("code","icredit_disabled");
+	out.put("message","שירות iCredit אינו מופעל בהגדרות");
+	return out.toString();
+}
+testMode = ifnull(zoho.crm.getOrgVariable(prefix + "ICredit_Test_Mode"),"true").toString() == "true";
+groupToken = "";
+if(testMode)
+{
+	groupToken = ifnull(zoho.crm.getOrgVariable(prefix + "ICredit_Group_Token_Test"),"").toString();
+}
+else
+{
+	groupToken = ifnull(zoho.crm.getOrgVariable(prefix + "ICredit_Group_Token_Prod"),"").toString();
+}
+if(groupToken == "")
+{
+	out.put("code","no_token");
+	out.put("message","חסר GroupPrivateToken עבור " + if(testMode,"סביבת בדיקה","סביבת ייצור"));
+	return out.toString();
+}
+icBase = "https://icredit.rivhit.co.il/API/PaymentPageRequest.svc/";
+if(testMode)
+{
+	icBase = "https://testicredit.rivhit.co.il/API/PaymentPageRequest.svc/";
+}
+ipnUrl = ifnull(zoho.crm.getOrgVariable(prefix + "ICredit_IPN_URL"),"").toString();
+ipnFailUrl = ifnull(zoho.crm.getOrgVariable(prefix + "ICredit_IPN_Failure_URL"),"").toString();
+redirectUrl = ifnull(zoho.crm.getOrgVariable(prefix + "ICredit_Redirect_URL"),"").toString();
+defLang = ifnull(zoho.crm.getOrgVariable(prefix + "Default_Language"),"he").toString();
+permsRaw = ifnull(zoho.crm.getOrgVariable(prefix + "Action_Permissions"),"").toString();
+if(permsRaw != "")
+{
+	allowed = true;
+	try
+	{
+		perms = permsRaw.toMap();
+		al = ifnull(perms.get("paymentLink"),List());
+		if(al.size() > 0)
+		{
+			allowed = false;
+			me = zoho.crm.getRecordById("users",zoho.loginuserid);
+			mp = ifnull(me.get("profile"),Map());
+			mid = ifnull(mp.get("id"),"").toString();
+			mnm = ifnull(mp.get("name"),"").toString();
+			for each  p in al
+			{
+				if(p.toString() == mid || p.toString() == mnm)
+				{
+					allowed = true;
+				}
+			}
+		}
+	}
+	catch (pe)
+	{
+		allowed = true;
+	}
+	if(!allowed)
+	{
+		out.put("code","forbidden");
+		out.put("message","אין לך הרשאה ליצור קישורי תשלום");
+		return out.toString();
+	}
+}
+rec = Map();
+try
+{
+	rec = zoho.crm.getRecordById(moduleName,recordId.toLong());
+}
+catch (re)
+{
+	rec = Map();
+}
+if(rec.isEmpty() || rec.get("id") == null)
+{
+	out.put("code","record_not_found");
+	out.put("message","הרשומה לא נמצאה");
+	return out.toString();
+}
+fDocNum = "Rivhit_Document_Number";
+fPayUrl = "ICredit_Payment_URL";
+fStatus = "Rivhit_Payment_Status";
+fCur = "Rivhit_Currency_ID";
+for each  k in rec.keys()
+{
+	ks = k.toString();
+	if(ks.endsWith("Rivhit_Document_Number"))
+	{
+		fDocNum = ks;
+	}
+	else if(ks.endsWith("ICredit_Payment_URL"))
+	{
+		fPayUrl = ks;
+	}
+	else if(ks.endsWith("Rivhit_Payment_Status"))
+	{
+		fStatus = ks;
+	}
+	else if(ks.endsWith("Rivhit_Currency_ID"))
+	{
+		fCur = ks;
+	}
+}
+// The double-issue guard: if iCredit issues documents and one already exists,
+// a payment page would produce a SECOND tax document for the same sale.
+icIssues = ifnull(zoho.crm.getOrgVariable(prefix + "ICredit_Issues_Document"),"true").toString() == "true";
+existingDoc = ifnull(rec.get(fDocNum),0).toLong();
+if(icIssues && existingDoc > 0 && !ifnull(argsMap.get("acknowledgeDoubleIssue"),false))
+{
+	out.put("code","double_issue_risk");
+	out.put("message","כבר קיים מסמך (" + existingDoc + ") ו-iCredit מוגדר להפיק מסמך בעצמו — יווצרו שני מסמכי מס. עדיף לרשום תשלום מול המסמך הקיים.");
+	dz = Map();
+	dz.put("existingDocument",existingDoc);
+	dz.put("canOverride",true);
+	out.put("data",dz);
+	return out.toString();
+}
+
+// ── Currency. The iCredit page has its own configured currency set. ────────
+curId = ifnull(rec.get(fCur),0).toLong();
+if(curId == 0)
+{
+	isoCode = ifnull(rec.get("Currency"),"ILS").toString().toUpperCase();
+	curId = 1;
+	if(isoCode == "USD")
+	{
+		curId = 2;
+	}
+	else if(isoCode == "EUR")
+	{
+		curId = 3;
+	}
+	else if(isoCode == "GBP")
+	{
+		curId = 4;
+	}
+	else if(isoCode == "AUD")
+	{
+		curId = 5;
+	}
+	else if(isoCode == "CAD")
+	{
+		curId = 6;
+	}
+	else if(isoCode == "CHF")
+	{
+		curId = 7;
+	}
+}
+exRate = ifnull(rec.get("Exchange_Rate"),0).toDecimal();
+
+// ── Customer ────────────────────────────────────────────────────────────────
+custId = 0;
+custName = "";
+custFirst = "";
+custEmail = "";
+custPhone = "";
+custTax = "";
+acct = ifnull(rec.get("Account_Name"),Map());
+contact = ifnull(rec.get("Contact_Name"),Map());
+billTo = acct;
+billModule = "Accounts";
+if(billTo.isEmpty() || billTo.get("id") == null)
+{
+	billTo = contact;
+	billModule = "Contacts";
+}
+if(!billTo.isEmpty() && billTo.get("id") != null)
+{
+	try
+	{
+		br = zoho.crm.getRecordById(billModule,billTo.get("id").toLong());
+		for each  bk in br.keys()
+		{
+			bks = bk.toString();
+			if(bks.endsWith("Rivhit_Customer_ID"))
+			{
+				custId = ifnull(br.get(bk),0).toLong();
+			}
+			else if(bks.endsWith("Rivhit_Tax_ID"))
+			{
+				custTax = ifnull(br.get(bk),"").toString().replaceAll("[^0-9]","");
+			}
+		}
+		custName = ifnull(br.get("Account_Name"),ifnull(br.get("Last_Name"),"")).toString();
+		custFirst = ifnull(br.get("First_Name"),"").toString();
+		custEmail = ifnull(br.get("Email"),"").toString();
+		custPhone = ifnull(br.get("Phone"),"").toString();
+	}
+	catch (be)
+	{
+		custId = 0;
+	}
+}
+if(custName == "")
+{
+	custName = ifnull(rec.get("Subject"),"לקוח").toString();
+}
+if(custName.length() > 30)
+{
+	custName = custName.subString(0,30);
+}
+if(custFirst.length() > 20)
+{
+	custFirst = custFirst.subString(0,20);
+}
+
+// ── Items ───────────────────────────────────────────────────────────────────
+items = List();
+total = 0.0;
+lines = ifnull(rec.get("Product_Details"),List());
+for each  ln in lines
+{
+	prod = ifnull(ln.get("product"),Map());
+	qty = ifnull(ln.get("quantity"),1).toDecimal();
+	if(qty == 0)
+	{
+		qty = 1;
+	}
+	lp = ifnull(ln.get("list_price"),0).toDecimal();
+	disc = ifnull(ln.get("Discount"),0).toDecimal();
+	lineTotal = (lp * qty - disc).round(2);
+	unit = (lineTotal / qty).round(4);
+	desc = ifnull(ln.get("product_description"),"").toString();
+	if(desc == "")
+	{
+		desc = ifnull(prod.get("name"),"פריט").toString();
+	}
+	if(desc.length() > 100)
+	{
+		desc = desc.subString(0,100);
+	}
+	it = Map();
+	it.put("Id",0);
+	it.put("CatalogNumber",ifnull(prod.get("Product_Code"),"").toString());
+	it.put("UnitPrice",unit);
+	it.put("Quantity",qty);
+	it.put("Description",desc);
+	items.add(it);
+	total = total + lineTotal;
+}
+total = total.round(2);
+if(overrideAmount > 0)
+{
+	total = overrideAmount.round(2);
+	oneItem = List();
+	oi = Map();
+	oi.put("Id",0);
+	oi.put("UnitPrice",total);
+	oi.put("Quantity",1);
+	oi.put("Description",ifnull(rec.get("Subject"),"תשלום").toString());
+	oneItem.add(oi);
+	items = oneItem;
+}
+if(total <= 0)
+{
+	out.put("code","zero_total");
+	out.put("message","סכום התשלום חייב להיות גדול מאפס");
+	return out.toString();
+}
+
+// ── Request ─────────────────────────────────────────────────────────────────
+p = Map();
+p.put("GroupPrivateToken",groupToken);
+p.put("Items",items);
+p.put("Currency",curId);
+if(curId != 1 && exRate > 0)
+{
+	p.put("ExchangeRate",exRate);
+}
+p.put("DocumentLanguage",defLang);
+p.put("MaxPayments",maxPayments);
+p.put("CustomerLastName",custName);
+if(custFirst != "")
+{
+	p.put("CustomerFirstName",custFirst);
+}
+if(custEmail != "")
+{
+	p.put("EmailAddress",custEmail);
+}
+if(custPhone != "")
+{
+	p.put("PhoneNumber",custPhone);
+}
+if(custTax != "" && curId == 1)
+{
+	try
+	{
+		p.put("IdNumber",custTax.toLong());
+	}
+	catch (tx)
+	{
+		p.put("IdNumber",0);
+	}
+}
+if(custId > 0)
+{
+	p.put("CustomerId",custId);
+}
+if(ipnUrl != "")
+{
+	p.put("IPNURL",ipnUrl);
+	p.put("IPNMethod",1);
+}
+// Without a distinct failure URL, declines land on the success endpoint — once
+// per failed attempt.
+if(ipnFailUrl != "")
+{
+	p.put("IPNFailureURL",ipnFailUrl);
+}
+if(redirectUrl != "")
+{
+	p.put("RedirectURL",redirectUrl);
+}
+p.put("Custom1",moduleName + ":" + recordId);
+p.put("Custom2",ifnull(rec.get("Subject"),"").toString());
+p.put("SaleType",1);
+payUrl = "";
+saleTokenPrivate = "";
+saleTokenPublic = "";
+errMsg = "";
+errCode = "";
+ok = false;
+try
+{
+	rr = invokeurl
+	[
+		url :icBase + "GetUrl"
+		type :POST
+		parameters :p.toString()
+		headers :{"Content-Type":"application/json"}
+	];
+	st = -9999;
+	try
+	{
+		st = ifnull(rr.get("Status"),-9999).toLong();
+	}
+	catch (sp)
+	{
+		st = -9999;
+	}
+	if(st == 0)
+	{
+		payUrl = ifnull(rr.get("URL"),"").toString();
+		saleTokenPrivate = ifnull(rr.get("PrivateSaleToken"),"").toString();
+		saleTokenPublic = ifnull(rr.get("PublicSaleToken"),"").toString();
+		if(payUrl != "")
+		{
+			ok = true;
+		}
+		else
+		{
+			errCode = "no_url";
+			errMsg = "iCredit לא החזירה כתובת לדף תשלום";
+		}
+	}
+	else if(st == -9999)
+	{
+		errCode = "unparseable";
+		errMsg = "תשובה לא קריאה מ-iCredit";
+	}
+	else
+	{
+		errCode = "icredit_" + st;
+		errMsg = ifnull(rr.get("DebugMessage"),"יצירת דף התשלום נכשלה").toString();
+	}
+}
+catch (te)
+{
+	errCode = "transport";
+	errMsg = "שגיאת תקשורת מול iCredit";
+	info "rv_icredit_get_url transport: " + te.toString();
+}
+if(!ok)
+{
+	out.put("code",errCode);
+	out.put("message",errMsg);
+	return out.toString();
+}
+try
+{
+	u = Map();
+	u.put(fPayUrl,payUrl);
+	zoho.crm.updateRecord(moduleName,recordId.toLong(),u);
+}
+catch (ue)
+{
+	info "rv_icredit_get_url: could not store the payment URL: " + ue.toString();
+}
+try
+{
+	nt = Map();
+	nt.put("Note_Title","iCredit — נוצר קישור לתשלום");
+	nt.put("Note_Content","נוצר דף תשלום" + "\n" + "סכום: " + total + "\n" + "מטבע: " + curId + "\n" + "תשלומים מקסימלי: " + maxPayments + "\n" + "סביבה: " + if(testMode,"בדיקה","ייצור") + "\n" + "מפיק המסמך: " + if(icIssues,"iCredit","ההרחבה"));
+	nt.put("Parent_Id",recordId);
+	nt.put("se_module",moduleName);
+	zoho.crm.createRecord("Notes",nt);
+}
+catch (ne)
+{
+	info "rv_icredit_get_url: note skipped";
+}
+d = Map();
+d.put("url",payUrl);
+d.put("amount",total);
+d.put("currencyId",curId);
+d.put("privateSaleToken",saleTokenPrivate);
+d.put("publicSaleToken",saleTokenPublic);
+d.put("testMode",testMode);
+d.put("icreditIssuesDocument",icIssues);
+out.put("ok",true);
+out.put("code","ok");
+out.put("message","קישור התשלום נוצר");
+out.put("data",d);
+return out.toString();

@@ -1,0 +1,357 @@
+// ════════════════════════════════════════════════════════════════════════════
+//  rv_confirmation  —  V1.0-r1  —  NOT billable
+//  PASTE BODY ONLY. Category: REST API. Return: STRING. Argument: crmAPIRequest.
+//
+//  Acquires a missing Israel Tax Authority allocation number (מספר הקצאה) for a
+//  document that was issued while the Tax Authority link was unavailable.
+//
+//  This is compliance, not sync: without an allocation number the customer may be
+//  unable to deduct input VAT. It is checked ONLY for types Rivhit flags as
+//  is_accounting — a delivery note or price quote never needs one, and flagging
+//  those as Missing would train people to ignore the exception list.
+// ════════════════════════════════════════════════════════════════════════════
+
+prefix = "rivhitzohocrmextension__";
+out = Map();
+out.put("ok",false);
+out.put("code","init");
+out.put("message","");
+
+argsMap = Map();
+reqBody = crmAPIRequest.get("body");
+if(reqBody != null && reqBody.toString() != "" && reqBody.toString() != "null")
+{
+	try
+	{
+		cand = reqBody.toString().toMap();
+		if(cand.get("arguments") != null)
+		{
+			argsMap = cand.get("arguments").toString().toMap();
+		}
+		else
+		{
+			argsMap = cand;
+		}
+	}
+	catch (e)
+	{
+		argsMap = Map();
+	}
+}
+if(argsMap.get("recordId") == null)
+{
+	pr = crmAPIRequest.get("params");
+	if(pr != null)
+	{
+		try
+		{
+			pm = pr.toString().toMap();
+			if(pm.get("arguments") != null)
+			{
+				argsMap = pm.get("arguments").toString().toMap();
+			}
+			else
+			{
+				argsMap = pm;
+			}
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+if(argsMap.get("recordId") == null)
+{
+	ra = crmAPIRequest.get("arguments");
+	if(ra != null && ra.toString() != "")
+	{
+		try
+		{
+			argsMap = ra.toString().toMap();
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+moduleName = ifnull(argsMap.get("module"),"Invoices").toString();
+recordId = ifnull(argsMap.get("recordId"),"").toString();
+approverId = ifnull(argsMap.get("approverId"),"").toString();
+if(recordId == "")
+{
+	out.put("code","bad_request");
+	out.put("message","חסר מזהה רשומה");
+	return out.toString();
+}
+apiToken = ifnull(zoho.crm.getOrgVariable(prefix + "API_Token"),"").toString();
+if(apiToken == "")
+{
+	out.put("code","not_configured");
+	out.put("message","ההרחבה טרם הוגדרה");
+	return out.toString();
+}
+baseUrl = "https://api.rivhit.co.il/online/RivhitOnlineAPI.svc/";
+rec = Map();
+try
+{
+	rec = zoho.crm.getRecordById(moduleName,recordId.toLong());
+}
+catch (re)
+{
+	rec = Map();
+}
+if(rec.isEmpty() || rec.get("id") == null)
+{
+	out.put("code","record_not_found");
+	out.put("message","הרשומה לא נמצאה");
+	return out.toString();
+}
+fDocNum = "Rivhit_Document_Number";
+fDocType = "Rivhit_Document_Type";
+fConfNum = "Rivhit_Confirmation_Number";
+fConfSt = "Rivhit_Confirmation_Status";
+fSync = "Rivhit_Last_Sync";
+for each  k in rec.keys()
+{
+	ks = k.toString();
+	if(ks.endsWith("Rivhit_Document_Number"))
+	{
+		fDocNum = ks;
+	}
+	else if(ks.endsWith("Rivhit_Document_Type"))
+	{
+		fDocType = ks;
+	}
+	else if(ks.endsWith("Rivhit_Confirmation_Number"))
+	{
+		fConfNum = ks;
+	}
+	else if(ks.endsWith("Rivhit_Confirmation_Status"))
+	{
+		fConfSt = ks;
+	}
+	else if(ks.endsWith("Rivhit_Last_Sync"))
+	{
+		fSync = ks;
+	}
+}
+docType = ifnull(rec.get(fDocType),0).toLong();
+docNum = ifnull(rec.get(fDocNum),0).toLong();
+if(docNum == 0)
+{
+	out.put("code","no_document");
+	out.put("message","טרם הופק מסמך");
+	return out.toString();
+}
+existingConf = ifnull(rec.get(fConfNum),"").toString();
+if(existingConf != "" && existingConf != "0")
+{
+	d0 = Map();
+	d0.put("confirmationNumber",existingConf);
+	out.put("ok",true);
+	out.put("code","already_have");
+	out.put("message","למסמך כבר יש מספר הקצאה");
+	out.put("data",d0);
+	return out.toString();
+}
+
+// The approver's ת.ז — from the argument, else the business tax id in settings.
+if(approverId == "")
+{
+	approverId = ifnull(zoho.crm.getOrgVariable(prefix + "Approver_ID_Number"),"").toString();
+}
+if(approverId == "")
+{
+	out.put("code","missing_approver");
+	out.put("message","נדרש מספר ת.ז של המאשר לצורך קבלת מספר הקצאה");
+	return out.toString();
+}
+
+// Before spending a call, check whether Rivhit already has one for this document.
+try
+{
+	dp = Map();
+	dp.put("api_token",apiToken);
+	dp.put("document_type",docType);
+	dp.put("document_number",docNum);
+	dr = invokeurl
+	[
+		url :baseUrl + "Document.Details"
+		type :POST
+		parameters :dp.toString()
+		headers :{"Content-Type":"application/json"}
+	];
+	dec = -9999;
+	try
+	{
+		dec = ifnull(dr.get("error_code"),-9999).toLong();
+	}
+	catch (dpe)
+	{
+		dec = -9999;
+	}
+	if(dec == 0)
+	{
+		dd = ifnull(dr.get("data"),Map());
+		already = ifnull(dd.get("confirmation_number"),"").toString();
+		if(already != "" && already != "0")
+		{
+			u0 = Map();
+			u0.put(fConfNum,already);
+			u0.put(fConfSt,"Obtained");
+			try
+			{
+				zoho.crm.updateRecord(moduleName,recordId.toLong(),u0);
+			}
+			catch (uex)
+			{
+				info "rv_confirmation: update skipped";
+			}
+			d1 = Map();
+			d1.put("confirmationNumber",already);
+			out.put("ok",true);
+			out.put("code","found_existing");
+			out.put("message","מספר ההקצאה אותר ברווחית ונשמר");
+			out.put("data",d1);
+			return out.toString();
+		}
+	}
+}
+catch (dte)
+{
+	info "rv_confirmation: Document.Details probe failed: " + dte.toString();
+}
+
+// ── Request the allocation number ──────────────────────────────────────────
+gotConf = "";
+errMsg = "";
+errCode = "";
+ok = false;
+p = Map();
+p.put("api_token",apiToken);
+p.put("document_type",docType);
+p.put("document_number",docNum);
+try
+{
+	p.put("id_number",approverId.replaceAll("[^0-9]","").toLong());
+}
+catch (ape)
+{
+	out.put("code","bad_approver");
+	out.put("message","מספר ת.ז של המאשר אינו תקין");
+	return out.toString();
+}
+try
+{
+	rr = invokeurl
+	[
+		url :baseUrl + "Document.InvoiceApproval"
+		type :POST
+		parameters :p.toString()
+		headers :{"Content-Type":"application/json"}
+	];
+	ec = -9999;
+	try
+	{
+		ec = ifnull(rr.get("error_code"),-9999).toLong();
+	}
+	catch (rpe)
+	{
+		ec = -9999;
+	}
+	if(ec == 0)
+	{
+		gotConf = ifnull(rr.get("confirmation_number"),"").toString();
+		if(gotConf == "" || gotConf == "0")
+		{
+			dz = ifnull(rr.get("data"),Map());
+			gotConf = ifnull(dz.get("confirmation_number"),"").toString();
+		}
+		if(gotConf != "" && gotConf != "0")
+		{
+			ok = true;
+		}
+		else
+		{
+			errCode = "empty_confirmation";
+			errMsg = "רווחית החזירה הצלחה ללא מספר הקצאה";
+		}
+	}
+	else if(ec == -9999)
+	{
+		errCode = "unparseable";
+		errMsg = "תשובה לא קריאה מרווחית";
+	}
+	else
+	{
+		errCode = "rivhit_" + ec;
+		errMsg = ifnull(rr.get("client_message"),"קבלת מספר הקצאה נכשלה").toString();
+		info "rv_confirmation debug: " + ifnull(rr.get("debug_message"),"").toString();
+	}
+}
+catch (te)
+{
+	errCode = "transport";
+	errMsg = "שגיאת תקשורת מול רווחית";
+	info "rv_confirmation transport: " + te.toString();
+}
+upd = Map();
+if(ok)
+{
+	upd.put(fConfNum,gotConf);
+	upd.put(fConfSt,"Obtained");
+}
+else
+{
+	upd.put(fConfSt,"Retry Failed");
+}
+try
+{
+	zoho.crm.updateRecord(moduleName,recordId.toLong(),upd);
+}
+catch (ue)
+{
+	info "rv_confirmation: CRM update failed: " + ue.toString();
+}
+try
+{
+	u2 = Map();
+	u2.put(fSync,zoho.currenttime);
+	zoho.crm.updateRecord(moduleName,recordId.toLong(),u2);
+}
+catch (ue2)
+{
+	info "rv_confirmation: timestamp skipped";
+}
+try
+{
+	nt = Map();
+	nt.put("Note_Title","רווחית — מספר הקצאה " + if(ok,"התקבל","נכשל"));
+	nt.put("Note_Content",if(ok,"התקבל מספר הקצאה מרשות המסים: " + gotConf,"בקשת מספר הקצאה נכשלה: " + errMsg) + "\n" + "מסמך: " + docType + "/" + docNum);
+	nt.put("Parent_Id",recordId);
+	nt.put("se_module",moduleName);
+	zoho.crm.createRecord("Notes",nt);
+}
+catch (ne)
+{
+	info "rv_confirmation: note skipped";
+}
+d = Map();
+d.put("confirmationNumber",gotConf);
+d.put("documentType",docType);
+d.put("documentNumber",docNum);
+if(ok)
+{
+	out.put("ok",true);
+	out.put("code","obtained");
+	out.put("message","מספר ההקצאה התקבל ונשמר");
+}
+else
+{
+	out.put("code",errCode);
+	out.put("message",errMsg);
+}
+out.put("data",d);
+return out.toString();

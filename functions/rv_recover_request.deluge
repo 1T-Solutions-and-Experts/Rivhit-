@@ -1,0 +1,407 @@
+// ════════════════════════════════════════════════════════════════════════════
+//  rv_recover_request  —  V1.0-r1  —  NOT billable
+//  PASTE BODY ONLY. Category: REST API. Return: STRING. Argument: crmAPIRequest.
+//
+//  Answers the only question that matters after an ambiguous write: did the
+//  document actually get created?
+//
+//  Two independent paths, because Status.LastRequest retention is unknown:
+//    1. Status.LastRequest with the stored request_reference
+//    2. Document.List filtered on `reference` — we stamp every document with a
+//       numeric derivative of the CRM record id precisely so this works
+//
+//  A retry is NEVER issued from here. Recovery either finds the document and
+//  links it, or proves nothing was created and hands the decision back.
+// ════════════════════════════════════════════════════════════════════════════
+
+prefix = "rivhitzohocrmextension__";
+out = Map();
+out.put("ok",false);
+out.put("code","init");
+out.put("message","");
+
+argsMap = Map();
+reqBody = crmAPIRequest.get("body");
+if(reqBody != null && reqBody.toString() != "" && reqBody.toString() != "null")
+{
+	try
+	{
+		cand = reqBody.toString().toMap();
+		if(cand.get("arguments") != null)
+		{
+			argsMap = cand.get("arguments").toString().toMap();
+		}
+		else
+		{
+			argsMap = cand;
+		}
+	}
+	catch (e)
+	{
+		argsMap = Map();
+	}
+}
+if(argsMap.get("recordId") == null)
+{
+	pr = crmAPIRequest.get("params");
+	if(pr != null)
+	{
+		try
+		{
+			pm = pr.toString().toMap();
+			if(pm.get("arguments") != null)
+			{
+				argsMap = pm.get("arguments").toString().toMap();
+			}
+			else
+			{
+				argsMap = pm;
+			}
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+if(argsMap.get("recordId") == null)
+{
+	ra = crmAPIRequest.get("arguments");
+	if(ra != null && ra.toString() != "")
+	{
+		try
+		{
+			argsMap = ra.toString().toMap();
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+moduleName = ifnull(argsMap.get("module"),"Invoices").toString();
+recordId = ifnull(argsMap.get("recordId"),"").toString();
+if(recordId == "")
+{
+	out.put("code","bad_request");
+	out.put("message","חסר מזהה רשומה");
+	return out.toString();
+}
+apiToken = ifnull(zoho.crm.getOrgVariable(prefix + "API_Token"),"").toString();
+if(apiToken == "")
+{
+	out.put("code","not_configured");
+	out.put("message","ההרחבה טרם הוגדרה");
+	return out.toString();
+}
+baseUrl = "https://api.rivhit.co.il/online/RivhitOnlineAPI.svc/";
+rec = Map();
+try
+{
+	rec = zoho.crm.getRecordById(moduleName,recordId.toLong());
+}
+catch (re)
+{
+	rec = Map();
+}
+if(rec.isEmpty() || rec.get("id") == null)
+{
+	out.put("code","record_not_found");
+	out.put("message","הרשומה לא נמצאה");
+	return out.toString();
+}
+fDocNum = "Rivhit_Document_Number";
+fDocType = "Rivhit_Document_Type";
+fDocId = "Rivhit_Document_Identity";
+fDocUrl = "Rivhit_Document_URL";
+fReqRef = "Rivhit_Request_Reference";
+fStatus = "Rivhit_Payment_Status";
+fConfNum = "Rivhit_Confirmation_Number";
+fIssue = "Rivhit_Issue_Date";
+fSync = "Rivhit_Last_Sync";
+for each  k in rec.keys()
+{
+	ks = k.toString();
+	if(ks.endsWith("Rivhit_Document_Number"))
+	{
+		fDocNum = ks;
+	}
+	else if(ks.endsWith("Rivhit_Document_Type"))
+	{
+		fDocType = ks;
+	}
+	else if(ks.endsWith("Rivhit_Document_Identity"))
+	{
+		fDocId = ks;
+	}
+	else if(ks.endsWith("Rivhit_Document_URL"))
+	{
+		fDocUrl = ks;
+	}
+	else if(ks.endsWith("Rivhit_Request_Reference"))
+	{
+		fReqRef = ks;
+	}
+	else if(ks.endsWith("Rivhit_Payment_Status"))
+	{
+		fStatus = ks;
+	}
+	else if(ks.endsWith("Rivhit_Confirmation_Number"))
+	{
+		fConfNum = ks;
+	}
+	else if(ks.endsWith("Rivhit_Issue_Date"))
+	{
+		fIssue = ks;
+	}
+	else if(ks.endsWith("Rivhit_Last_Sync"))
+	{
+		fSync = ks;
+	}
+}
+existingDocNum = ifnull(rec.get(fDocNum),0).toLong();
+if(existingDocNum > 0)
+{
+	d0 = Map();
+	d0.put("documentNumber",existingDocNum);
+	out.put("ok",true);
+	out.put("code","already_linked");
+	out.put("message","המסמך כבר מקושר לרשומה");
+	out.put("data",d0);
+	return out.toString();
+}
+reqRef = ifnull(rec.get(fReqRef),"").toString();
+
+// ── Path 1: Status.LastRequest ─────────────────────────────────────────────
+found = false;
+foundType = 0;
+foundNum = 0;
+foundIdentity = "";
+foundLink = "";
+foundConf = "";
+via = "";
+notFoundProof = false;
+if(reqRef != "")
+{
+	sp = Map();
+	sp.put("api_token",apiToken);
+	sp.put("request_reference",reqRef);
+	try
+	{
+		sr = invokeurl
+		[
+			url :baseUrl + "Status.LastRequest/JSON"
+			type :POST
+			parameters :sp.toString()
+			headers :{"Content-Type":"application/json"}
+		];
+		sec = -9999;
+		try
+		{
+			sec = ifnull(sr.get("error_code"),-9999).toLong();
+		}
+		catch (spe)
+		{
+			sec = -9999;
+		}
+		if(sec == 0)
+		{
+			sdata = ifnull(sr.get("data"),Map());
+			inner = Map();
+			// `data` holds the ORIGINAL response, sometimes as a nested string.
+			try
+			{
+				raw = ifnull(sdata.get("data"),"").toString();
+				if(raw != "")
+				{
+					inner = raw.toMap();
+				}
+			}
+			catch (ipe)
+			{
+				inner = Map();
+			}
+			if(inner.isEmpty())
+			{
+				inner = sdata;
+			}
+			payloadPart = ifnull(inner.get("data"),inner);
+			foundNum = ifnull(payloadPart.get("document_number"),0).toLong();
+			foundType = ifnull(payloadPart.get("document_type"),0).toLong();
+			foundIdentity = ifnull(payloadPart.get("document_identity"),"").toString();
+			foundLink = ifnull(payloadPart.get("document_link"),"").toString();
+			foundConf = ifnull(payloadPart.get("confirmation_number"),"").toString();
+			if(foundNum > 0)
+			{
+				found = true;
+				via = "Status.LastRequest";
+			}
+		}
+		else if(sec == -2)
+		{
+			// NO_DATA_FOUND — positive proof that nothing was created.
+			notFoundProof = true;
+		}
+	}
+	catch (ste)
+	{
+		info "rv_recover_request Status.LastRequest transport: " + ste.toString();
+	}
+}
+
+// ── Path 2: Document.List filtered on our reference stamp ──────────────────
+if(!found)
+{
+	refNum = 0;
+	try
+	{
+		refNum = recordId.right(9).toLong();
+	}
+	catch (rfe)
+	{
+		refNum = 0;
+	}
+	if(refNum > 0)
+	{
+		lp = Map();
+		lp.put("api_token",apiToken);
+		lp.put("from_date",zoho.currentdate.subDay(14).toString("dd/MM/yyyy"));
+		lp.put("to_date",zoho.currentdate.addDay(1).toString("dd/MM/yyyy"));
+		ff = List();
+		f1 = Map();
+		f1.put("filter_field","reference");
+		f1.put("filter_value",refNum.toString());
+		ff.add(f1);
+		lp.put("filter_fields",ff);
+		try
+		{
+			lr = invokeurl
+			[
+				url :baseUrl + "Document.List"
+				type :POST
+				parameters :lp.toString()
+				headers :{"Content-Type":"application/json"}
+			];
+			lec = -9999;
+			try
+			{
+				lec = ifnull(lr.get("error_code"),-9999).toLong();
+			}
+			catch (lpe)
+			{
+				lec = -9999;
+			}
+			if(lec == 0)
+			{
+				rows = ifnull(lr.get("data"),List());
+				for each  row in rows
+				{
+					if(!found)
+					{
+						rref = ifnull(row.get("reference"),0).toLong();
+						isCan = ifnull(row.get("is_cancelled"),false);
+						if(rref == refNum && !isCan)
+						{
+							found = true;
+							via = "Document.List/reference";
+							foundNum = ifnull(row.get("document_number"),0).toLong();
+							foundType = ifnull(row.get("document_type"),0).toLong();
+							foundLink = ifnull(row.get("document_link"),"").toString();
+							foundConf = ifnull(row.get("confirmation_number"),"").toString();
+						}
+					}
+				}
+			}
+			else if(lec == -2 && notFoundProof)
+			{
+				notFoundProof = true;
+			}
+		}
+		catch (lte)
+		{
+			info "rv_recover_request Document.List transport: " + lte.toString();
+		}
+	}
+}
+
+// ── Outcome ────────────────────────────────────────────────────────────────
+if(found && foundNum > 0)
+{
+	upd = Map();
+	upd.put(fDocNum,foundNum);
+	upd.put(fDocType,foundType);
+	if(foundIdentity != "")
+	{
+		upd.put(fDocId,foundIdentity);
+	}
+	if(foundLink != "")
+	{
+		upd.put(fDocUrl,foundLink);
+	}
+	upd.put(fStatus,"Issued");
+	upd.put(fIssue,zoho.currentdate.toString("yyyy-MM-dd"));
+	if(foundConf != "" && foundConf != "0")
+	{
+		upd.put(fConfNum,foundConf);
+	}
+	try
+	{
+		zoho.crm.updateRecord(moduleName,recordId.toLong(),upd);
+	}
+	catch (ue)
+	{
+		info "rv_recover_request: CRM update failed: " + ue.toString();
+	}
+	try
+	{
+		u2 = Map();
+		u2.put(fSync,zoho.currenttime);
+		zoho.crm.updateRecord(moduleName,recordId.toLong(),u2);
+	}
+	catch (ue2)
+	{
+		info "rv_recover_request: timestamp skipped";
+	}
+	try
+	{
+		nt = Map();
+		nt.put("Note_Title","רווחית — שחזור מסמך " + foundNum);
+		nt.put("Note_Content","המסמך אותר ושויך לרשומה לאחר כשל לא ודאי" + "\n" + "מקור האיתור: " + via + "\n" + "מפתח ייחודיות: " + reqRef + "\n" + "מסמך: " + foundType + "/" + foundNum + "\n" + "לא הופק מסמך נוסף.");
+		nt.put("Parent_Id",recordId);
+		nt.put("se_module",moduleName);
+		zoho.crm.createRecord("Notes",nt);
+	}
+	catch (ne)
+	{
+		info "rv_recover_request: note skipped";
+	}
+	d = Map();
+	d.put("recovered",true);
+	d.put("via",via);
+	d.put("documentType",foundType);
+	d.put("documentNumber",foundNum);
+	d.put("documentUrl",foundLink);
+	d.put("confirmationNumber",foundConf);
+	out.put("ok",true);
+	out.put("code","recovered");
+	out.put("message","המסמך אותר ושויך לרשומה — לא הופק מסמך כפול");
+	out.put("data",d);
+	return out.toString();
+}
+d2 = Map();
+d2.put("recovered",false);
+d2.put("requestReference",reqRef);
+d2.put("safeToReissue",notFoundProof);
+out.put("ok",true);
+if(notFoundProof)
+{
+	out.put("code","nothing_created");
+	out.put("message","לא נוצר מסמך — ניתן להפיק שוב באותו מפתח ייחודיות");
+}
+else
+{
+	out.put("code","inconclusive");
+	out.put("message","לא ניתן לקבוע אם המסמך נוצר. בדוק ברווחית לפני הפקה חוזרת.");
+}
+out.put("data",d2);
+return out.toString();

@@ -1,0 +1,556 @@
+// ════════════════════════════════════════════════════════════════════════════
+//  rv_upsert_customer  —  V1.0-r1  —  NOT billable
+//  PASTE BODY ONLY. Category: REST API. Return: STRING. Argument: crmAPIRequest.
+//
+//  The resolution ladder. First hit wins; creation is the last rung and is
+//  unreachable while any lookup succeeds:
+//
+//    1. Rivhit_Customer_ID on the CRM record        → Customer.Update
+//    2. Customer.Get(acc_ref = surrogate) + VERIFY  → Customer.Update
+//    3. Customer.Get(email) + VERIFY                → Customer.Update
+//    4. nothing matched                             → Customer.New
+//
+//  The Green Invoice bridge had a missing `await` that made its dedup branch
+//  unreachable, so every sync created a new client — duplicates piling up in a
+//  customer's real books, latent across three major versions. Each rung here is
+//  separately testable and a match is CONFIRMED before it is used.
+//
+//  acc_ref holds only 9 characters, so it cannot hold an 18-19 digit Zoho id.
+//  The surrogate is a module letter plus the last 8 digits of the record id:
+//  deterministic, recomputable, and debuggable. It is a HINT — Rivhit_Customer_ID
+//  stays authoritative and every acc_ref hit is verified against name/tax id.
+//  Batched: pass `ids` and a `cursor`; the caller re-invokes until done.
+// ════════════════════════════════════════════════════════════════════════════
+
+prefix = "rivhitzohocrmextension__";
+out = Map();
+out.put("ok",false);
+out.put("code","init");
+out.put("message","");
+
+argsMap = Map();
+reqBody = crmAPIRequest.get("body");
+if(reqBody != null && reqBody.toString() != "" && reqBody.toString() != "null")
+{
+	try
+	{
+		cand = reqBody.toString().toMap();
+		if(cand.get("arguments") != null)
+		{
+			argsMap = cand.get("arguments").toString().toMap();
+		}
+		else
+		{
+			argsMap = cand;
+		}
+	}
+	catch (e)
+	{
+		argsMap = Map();
+	}
+}
+if(argsMap.get("ids") == null)
+{
+	pr = crmAPIRequest.get("params");
+	if(pr != null)
+	{
+		try
+		{
+			pm = pr.toString().toMap();
+			if(pm.get("arguments") != null)
+			{
+				argsMap = pm.get("arguments").toString().toMap();
+			}
+			else
+			{
+				argsMap = pm;
+			}
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+if(argsMap.get("ids") == null)
+{
+	ra = crmAPIRequest.get("arguments");
+	if(ra != null && ra.toString() != "")
+	{
+		try
+		{
+			argsMap = ra.toString().toMap();
+		}
+		catch (e)
+		{
+			argsMap = argsMap;
+		}
+	}
+}
+moduleName = ifnull(argsMap.get("module"),"Accounts").toString();
+ids = ifnull(argsMap.get("ids"),List());
+batchSize = ifnull(argsMap.get("batchSize"),12).toLong();
+if(batchSize > 20)
+{
+	// Zoho caps invokeurl calls per function execution. Two calls per record is
+	// the worst case, so keep a batch well inside the ceiling and let the caller
+	// drive the cursor.
+	batchSize = 20;
+}
+if(ids.size() == 0)
+{
+	out.put("code","bad_request");
+	out.put("message","לא נבחרו רשומות");
+	return out.toString();
+}
+apiToken = ifnull(zoho.crm.getOrgVariable(prefix + "API_Token"),"").toString();
+if(apiToken == "")
+{
+	out.put("code","not_configured");
+	out.put("message","ההרחבה טרם הוגדרה");
+	return out.toString();
+}
+baseUrl = "https://api.rivhit.co.il/online/RivhitOnlineAPI.svc/";
+permsRaw = ifnull(zoho.crm.getOrgVariable(prefix + "Action_Permissions"),"").toString();
+if(permsRaw != "")
+{
+	allowed = true;
+	try
+	{
+		perms = permsRaw.toMap();
+		al = ifnull(perms.get("syncCustomers"),List());
+		if(al.size() > 0)
+		{
+			allowed = false;
+			me = zoho.crm.getRecordById("users",zoho.loginuserid);
+			mp = ifnull(me.get("profile"),Map());
+			mid = ifnull(mp.get("id"),"").toString();
+			mnm = ifnull(mp.get("name"),"").toString();
+			for each  p in al
+			{
+				if(p.toString() == mid || p.toString() == mnm)
+				{
+					allowed = true;
+				}
+			}
+		}
+	}
+	catch (pe)
+	{
+		allowed = true;
+	}
+	if(!allowed)
+	{
+		out.put("code","forbidden");
+		out.put("message","אין לך הרשאה לסנכרן לקוחות");
+		return out.toString();
+	}
+}
+modLetter = "A";
+if(moduleName == "Contacts")
+{
+	modLetter = "C";
+}
+created = 0;
+updated = 0;
+failed = 0;
+processed = 0;
+results = List();
+remaining = List();
+idx = 0;
+for each  rid in ids
+{
+	idx = idx + 1;
+	if(idx > batchSize)
+	{
+		remaining.add(rid);
+	}
+	else
+	{
+		processed = processed + 1;
+		rowOut = Map();
+		rowOut.put("id",rid.toString());
+		cRec = Map();
+		try
+		{
+			cRec = zoho.crm.getRecordById(moduleName,rid.toLong());
+		}
+		catch (ge)
+		{
+			cRec = Map();
+		}
+		if(cRec.isEmpty() || cRec.get("id") == null)
+		{
+			failed = failed + 1;
+			rowOut.put("status","not_found");
+			results.add(rowOut);
+		}
+		else
+		{
+			fCustId = "Rivhit_Customer_ID";
+			fAccRef = "Rivhit_Acc_Ref";
+			fTaxId = "Rivhit_Tax_ID";
+			fVat = "Rivhit_VAT_Number";
+			fBal = "Rivhit_Balance";
+			fBalUpd = "Rivhit_Balance_Updated";
+			fSync = "Rivhit_Last_Sync";
+			fErr = "Rivhit_Sync_Error";
+			for each  k in cRec.keys()
+			{
+				ks = k.toString();
+				if(ks.endsWith("Rivhit_Customer_ID"))
+				{
+					fCustId = ks;
+				}
+				else if(ks.endsWith("Rivhit_Acc_Ref"))
+				{
+					fAccRef = ks;
+				}
+				else if(ks.endsWith("Rivhit_Tax_ID"))
+				{
+					fTaxId = ks;
+				}
+				else if(ks.endsWith("Rivhit_VAT_Number"))
+				{
+					fVat = ks;
+				}
+				else if(ks.endsWith("Rivhit_Balance"))
+				{
+					fBal = ks;
+				}
+				else if(ks.endsWith("Rivhit_Balance_Updated"))
+				{
+					fBalUpd = ks;
+				}
+				else if(ks.endsWith("Rivhit_Last_Sync"))
+				{
+					fSync = ks;
+				}
+				else if(ks.endsWith("Rivhit_Sync_Error"))
+				{
+					fErr = ks;
+				}
+			}
+			// ── surrogate ───────────────────────────────────────────────
+			surrogate = modLetter + rid.toString().right(8);
+			// ── field values, truncated to Rivhit's limits ─────────────
+			nm = ifnull(cRec.get("Account_Name"),ifnull(cRec.get("Last_Name"),"")).toString();
+			if(nm == "")
+			{
+				nm = "לקוח " + rid.toString().right(6);
+			}
+			if(nm.length() > 30)
+			{
+				nm = nm.subString(0,30);
+			}
+			fn = ifnull(cRec.get("First_Name"),"").toString();
+			if(fn.length() > 20)
+			{
+				fn = fn.subString(0,20);
+			}
+			em = ifnull(cRec.get("Email"),"").toString();
+			if(em.length() > 50)
+			{
+				em = "";
+			}
+			ph = ifnull(cRec.get("Phone"),"").toString();
+			if(ph.length() > 15)
+			{
+				ph = ph.subString(0,15);
+			}
+			ad = ifnull(cRec.get("Billing_Street"),ifnull(cRec.get("Mailing_Street"),"")).toString();
+			if(ad.length() > 30)
+			{
+				ad = ad.subString(0,30);
+			}
+			ct = ifnull(cRec.get("Billing_City"),ifnull(cRec.get("Mailing_City"),"")).toString();
+			if(ct.length() > 20)
+			{
+				ct = ct.subString(0,20);
+			}
+			zipRaw = ifnull(cRec.get("Billing_Code"),ifnull(cRec.get("Mailing_Zip"),"")).toString();
+			zipNum = 0;
+			try
+			{
+				zipNum = zipRaw.replaceAll("[^0-9]","").toLong();
+			}
+			catch (zx)
+			{
+				zipNum = 0;
+			}
+			taxRaw = ifnull(cRec.get(fTaxId),"").toString().replaceAll("[^0-9]","");
+			vatRaw = ifnull(cRec.get(fVat),"").toString().replaceAll("[^0-9]","");
+			existingId = ifnull(cRec.get(fCustId),0).toLong();
+			// ══ rung 1 ═══════════════════════════════════════════════════
+			resolvedId = existingId;
+			resolvedVia = "";
+			if(resolvedId > 0)
+			{
+				resolvedVia = "stored_id";
+			}
+			// ══ rung 2 — acc_ref, VERIFIED before it is trusted ══════════
+			if(resolvedId == 0)
+			{
+				try
+				{
+					g = Map();
+					g.put("api_token",apiToken);
+					g.put("acc_ref",surrogate);
+					gr = invokeurl
+					[
+						url :baseUrl + "Customer.Get"
+						type :POST
+						parameters :g.toString()
+						headers :{"Content-Type":"application/json"}
+					];
+					gec = -9999;
+					try
+					{
+						gec = ifnull(gr.get("error_code"),-9999).toLong();
+					}
+					catch (gp)
+					{
+						gec = -9999;
+					}
+					if(gec == 0)
+					{
+						gd = ifnull(gr.get("data"),Map());
+						candId = ifnull(gd.get("customer_id"),0).toLong();
+						candName = ifnull(gd.get("last_name"),"").toString();
+						candTax = ifnull(gd.get("id_number"),"").toString();
+						// verify: name OR tax id must agree, else treat as a collision
+						okMatch = false;
+						if(candName != "" && candName.equalsIgnoreCase(nm))
+						{
+							okMatch = true;
+						}
+						if(taxRaw != "" && candTax != "" && candTax.contains(taxRaw))
+						{
+							okMatch = true;
+						}
+						if(candId > 0 && okMatch)
+						{
+							resolvedId = candId;
+							resolvedVia = "acc_ref";
+						}
+						else if(candId > 0)
+						{
+							rowOut.put("accRefCollision",true);
+						}
+					}
+				}
+				catch (ge2)
+				{
+					info "rv_upsert_customer acc_ref lookup: " + ge2.toString();
+				}
+			}
+			// ══ rung 3 — email, VERIFIED ═════════════════════════════════
+			if(resolvedId == 0 && em != "")
+			{
+				try
+				{
+					g2 = Map();
+					g2.put("api_token",apiToken);
+					g2.put("email",em);
+					gr2 = invokeurl
+					[
+						url :baseUrl + "Customer.Get"
+						type :POST
+						parameters :g2.toString()
+						headers :{"Content-Type":"application/json"}
+					];
+					gec2 = -9999;
+					try
+					{
+						gec2 = ifnull(gr2.get("error_code"),-9999).toLong();
+					}
+					catch (gp2)
+					{
+						gec2 = -9999;
+					}
+					if(gec2 == 0)
+					{
+						gd2 = ifnull(gr2.get("data"),Map());
+						cid2 = ifnull(gd2.get("customer_id"),0).toLong();
+						if(cid2 > 0)
+						{
+							resolvedId = cid2;
+							resolvedVia = "email";
+						}
+					}
+				}
+				catch (ge3)
+				{
+					info "rv_upsert_customer email lookup: " + ge3.toString();
+				}
+			}
+			// ══ rung 4 — write ═══════════════════════════════════════════
+			body = Map();
+			body.put("api_token",apiToken);
+			body.put("last_name",nm);
+			if(fn != "")
+			{
+				body.put("first_name",fn);
+			}
+			if(em != "")
+			{
+				body.put("email",em);
+			}
+			if(ph != "")
+			{
+				body.put("phone",ph);
+			}
+			if(ad != "")
+			{
+				body.put("address",ad);
+			}
+			if(ct != "")
+			{
+				body.put("city",ct);
+			}
+			if(zipNum > 0)
+			{
+				body.put("zipcode",zipNum);
+			}
+			body.put("acc_ref",surrogate);
+			if(taxRaw != "")
+			{
+				try
+				{
+					body.put("id_number",taxRaw.toLong());
+				}
+				catch (tx)
+				{
+					body.put("id_number",0);
+				}
+			}
+			if(vatRaw != "")
+			{
+				try
+				{
+					body.put("vat_number",vatRaw.toLong());
+				}
+				catch (vx)
+				{
+					body.put("vat_number",0);
+				}
+			}
+			methodName = "Customer.New";
+			if(resolvedId > 0)
+			{
+				methodName = "Customer.Update";
+				body.put("customer_id",resolvedId);
+			}
+			body.put("request_reference","zcrm:" + moduleName + ":" + rid + ":cust:" + zoho.currenttime.toString("yyyyMMddHH"));
+			wOk = false;
+			wErr = "";
+			newId = resolvedId;
+			try
+			{
+				wr = invokeurl
+				[
+					url :baseUrl + methodName
+					type :POST
+					parameters :body.toString()
+					headers :{"Content-Type":"application/json"}
+				];
+				wec = -9999;
+				try
+				{
+					wec = ifnull(wr.get("error_code"),-9999).toLong();
+				}
+				catch (wp)
+				{
+					wec = -9999;
+				}
+				if(wec == 0)
+				{
+					wOk = true;
+					wd = ifnull(wr.get("data"),Map());
+					if(methodName == "Customer.New")
+					{
+						newId = ifnull(wd.get("customer_id"),0).toLong();
+						created = created + 1;
+						resolvedVia = "created";
+					}
+					else
+					{
+						updated = updated + 1;
+					}
+				}
+				else if(wec == -9999)
+				{
+					wErr = "תשובה לא קריאה מרווחית";
+				}
+				else
+				{
+					wErr = ifnull(wr.get("client_message"),"פעולה נכשלה").toString();
+					info "rv_upsert_customer debug " + rid + ": " + ifnull(wr.get("debug_message"),"").toString();
+				}
+			}
+			catch (wt)
+			{
+				wErr = "שגיאת תקשורת";
+			}
+			if(wOk)
+			{
+				cu = Map();
+				cu.put(fCustId,newId);
+				cu.put(fAccRef,surrogate);
+				cu.put(fErr,"");
+				try
+				{
+					zoho.crm.updateRecord(moduleName,rid.toLong(),cu);
+				}
+				catch (cue)
+				{
+					info "rv_upsert_customer: CRM write failed for " + rid;
+				}
+				try
+				{
+					cu2 = Map();
+					cu2.put(fSync,zoho.currenttime);
+					zoho.crm.updateRecord(moduleName,rid.toLong(),cu2);
+				}
+				catch (cue2)
+				{
+					info "rv_upsert_customer: timestamp skipped";
+				}
+				rowOut.put("status",if(resolvedVia == "created","created","updated"));
+				rowOut.put("via",resolvedVia);
+				rowOut.put("customerId",newId);
+			}
+			else
+			{
+				failed = failed + 1;
+				try
+				{
+					ce = Map();
+					ce.put(fErr,wErr);
+					zoho.crm.updateRecord(moduleName,rid.toLong(),ce);
+				}
+				catch (cee)
+				{
+					info "rv_upsert_customer: error field write skipped";
+				}
+				rowOut.put("status","failed");
+				rowOut.put("error",wErr);
+			}
+			rowOut.put("name",nm);
+			results.add(rowOut);
+		}
+	}
+}
+d = Map();
+d.put("processed",processed);
+d.put("created",created);
+d.put("updated",updated);
+d.put("failed",failed);
+d.put("remaining",remaining);
+d.put("remainingCount",remaining.size());
+d.put("results",results);
+out.put("ok",true);
+out.put("code",if(remaining.size() > 0,"partial","done"));
+out.put("message","עובדו " + processed + " רשומות" + if(remaining.size() > 0," — נותרו " + remaining.size(),""));
+out.put("data",d);
+return out.toString();

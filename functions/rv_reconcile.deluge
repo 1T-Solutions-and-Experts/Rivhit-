@@ -1,0 +1,537 @@
+// ════════════════════════════════════════════════════════════════════════════
+//  rv_reconcile  —  V1.0-r1  —  NOT billable (all reads)
+//  PASTE BODY ONLY. Category: REST API. Return: STRING. NO ARGUMENTS.
+//  Schedule it: Setup → Automation → Actions → Schedules, every 6 hours.
+//  Without a schedule this never runs and payment status is manual only.
+//
+//  Built on Customer.OpenDocuments, which returns the entire receivables
+//  position — including paid_amount PER DOCUMENT — in one call. That is Rivhit's
+//  own debt-aging report, so there is nothing to reconstruct.
+//
+//  Zoho caps invokeurl calls per function execution, so the per-document detail
+//  pass is BOUNDED and RESUMABLE: the cursor lives in the Sync_State org
+//  variable and the next scheduled run picks up where this one stopped. A run
+//  that stops early says so — it never reports "synced" with work outstanding.
+// ════════════════════════════════════════════════════════════════════════════
+
+prefix = "rivhitzohocrmextension__";
+out = Map();
+out.put("ok",false);
+out.put("code","init");
+out.put("message","");
+apiToken = ifnull(zoho.crm.getOrgVariable(prefix + "API_Token"),"").toString();
+if(apiToken == "")
+{
+	out.put("code","not_configured");
+	out.put("message","ההרחבה טרם הוגדרה");
+	return out.toString();
+}
+baseUrl = "https://api.rivhit.co.il/online/RivhitOnlineAPI.svc/";
+windowDays = ifnull(zoho.crm.getOrgVariable(prefix + "Reconcile_Window_Days"),"35").toLong();
+if(windowDays < 1)
+{
+	windowDays = 35;
+}
+DETAIL_BUDGET = 15;
+// Worst case is one Document.Details per changed document plus the sweeps above.
+// Keep the whole run well inside Zoho's per-execution integration-task ceiling.
+
+// ── 0. Token health check. A regenerated token otherwise fails silently until
+//       a user hits an error. ────────────────────────────────────────────────
+tokenOk = false;
+try
+{
+	hp = Map();
+	hp.put("api_token",apiToken);
+	hr = invokeurl
+	[
+		url :baseUrl + "Accounting.VatRate"
+		type :POST
+		parameters :hp.toString()
+		headers :{"Content-Type":"application/json"}
+	];
+	hec = -9999;
+	try
+	{
+		hec = ifnull(hr.get("error_code"),-9999).toLong();
+	}
+	catch (hpe)
+	{
+		hec = -9999;
+	}
+	if(hec == 0)
+	{
+		tokenOk = true;
+	}
+}
+catch (he)
+{
+	tokenOk = false;
+}
+if(!tokenOk)
+{
+	try
+	{
+		zoho.crm.invokeConnector("crm.set",{"apiname":prefix + "Health_State","value":"credentials_rejected"});
+	}
+	catch (hse)
+	{
+		info "rv_reconcile: could not write Health_State";
+	}
+	info "rv_reconcile: RIVHIT CREDENTIALS REJECTED — every flow is down until the token is re-entered.";
+	out.put("code","auth_failed");
+	out.put("message","האסימון של רווחית נדחה — יש להזין אותו מחדש בהגדרות");
+	return out.toString();
+}
+try
+{
+	zoho.crm.invokeConnector("crm.set",{"apiname":prefix + "Health_State","value":"ok"});
+}
+catch (hse2)
+{
+	info "rv_reconcile: Health_State write skipped";
+}
+
+// ── 1. Cursor ───────────────────────────────────────────────────────────────
+stateRaw = ifnull(zoho.crm.getOrgVariable(prefix + "Sync_State"),"").toString();
+state = Map();
+if(stateRaw != "")
+{
+	try
+	{
+		state = stateRaw.toMap();
+	}
+	catch (se)
+	{
+		state = Map();
+	}
+}
+pending = ifnull(state.get("pendingDetails"),List());
+
+// ── 2. Open documents — the whole receivables position, one bounded call ───
+fromDate = zoho.currentdate.subDay(windowDays).toString("dd/MM/yyyy");
+untilDate = zoho.currentdate.addDay(1).toString("dd/MM/yyyy");
+openRows = List();
+openOk = false;
+try
+{
+	op = Map();
+	op.put("api_token",apiToken);
+	op.put("customer_id",0);
+	op.put("accounting_only",true);
+	op.put("from_date",fromDate);
+	op.put("until_date",untilDate);
+	orr = invokeurl
+	[
+		url :baseUrl + "Customer.OpenDocuments"
+		type :POST
+		parameters :op.toString()
+		headers :{"Content-Type":"application/json"}
+	];
+	oec = -9999;
+	try
+	{
+		oec = ifnull(orr.get("error_code"),-9999).toLong();
+	}
+	catch (ope)
+	{
+		oec = -9999;
+	}
+	if(oec == 0)
+	{
+		od = ifnull(orr.get("data"),Map());
+		openRows = ifnull(od.get("open_documents"),List());
+		openOk = true;
+	}
+	else if(oec == -2)
+	{
+		openOk = true;
+	}
+	else
+	{
+		info "rv_reconcile OpenDocuments failed: " + ifnull(orr.get("debug_message"),"").toString();
+	}
+}
+catch (oe)
+{
+	info "rv_reconcile OpenDocuments transport: " + oe.toString();
+}
+
+// Index the open rows by "type/number" so a CRM record can be matched in memory.
+openIndex = Map();
+for each  r in openRows
+{
+	dt = ifnull(r.get("document_type"),0).toLong();
+	dn = ifnull(r.get("document_number"),0).toLong();
+	if(dn > 0)
+	{
+		openIndex.put(dt + "/" + dn,r);
+	}
+}
+
+// ── 3. Walk the CRM invoices and sales orders that carry a document ────────
+scanned = 0;
+matched = 0;
+updatedCount = 0;
+closedFound = 0;
+confGaps = 0;
+detailCalls = 0;
+newPending = List();
+modules = List();
+modules.add("Invoices");
+modules.add("Sales_Orders");
+for each  mod in modules
+{
+	crit = "((Rivhit_Document_Number:greater_than:0)and(Rivhit_Payment_Status:not_equal:Cancelled))";
+	recs = List();
+	try
+	{
+		recs = zoho.crm.searchRecords(mod,crit,1,200);
+	}
+	catch (sce)
+	{
+		// Namespaced fields make the plain criteria fail on some installs.
+		try
+		{
+			recs = zoho.crm.searchRecords(mod,"((" + prefix + "Rivhit_Document_Number:greater_than:0))",1,200);
+		}
+		catch (sce2)
+		{
+			recs = List();
+			info "rv_reconcile: search failed on " + mod + ": " + sce2.toString();
+		}
+	}
+	for each  rc in recs
+	{
+		scanned = scanned + 1;
+		fDocNum = "Rivhit_Document_Number";
+		fDocType = "Rivhit_Document_Type";
+		fStatus = "Rivhit_Payment_Status";
+		fPaid = "Rivhit_Paid_Amount";
+		fPaidDate = "Rivhit_Paid_Date";
+		fIsClosed = "Rivhit_Is_Closed";
+		fConfNum = "Rivhit_Confirmation_Number";
+		fConfSt = "Rivhit_Confirmation_Status";
+		fSync = "Rivhit_Last_Sync";
+		fInstTotal = "Rivhit_Instalments_Total";
+		fInstElapsed = "Rivhit_Instalments_Elapsed";
+		fInstProg = "Rivhit_Instalment_Progress";
+		fInstNext = "Rivhit_Next_Instalment_Date";
+		fInstAmt = "Rivhit_Instalment_Amount";
+		for each  k in rc.keys()
+		{
+			ks = k.toString();
+			if(ks.endsWith("Rivhit_Document_Number"))
+			{
+				fDocNum = ks;
+			}
+			else if(ks.endsWith("Rivhit_Document_Type"))
+			{
+				fDocType = ks;
+			}
+			else if(ks.endsWith("Rivhit_Payment_Status"))
+			{
+				fStatus = ks;
+			}
+			else if(ks.endsWith("Rivhit_Paid_Amount"))
+			{
+				fPaid = ks;
+			}
+			else if(ks.endsWith("Rivhit_Paid_Date"))
+			{
+				fPaidDate = ks;
+			}
+			else if(ks.endsWith("Rivhit_Is_Closed"))
+			{
+				fIsClosed = ks;
+			}
+			else if(ks.endsWith("Rivhit_Confirmation_Number"))
+			{
+				fConfNum = ks;
+			}
+			else if(ks.endsWith("Rivhit_Confirmation_Status"))
+			{
+				fConfSt = ks;
+			}
+			else if(ks.endsWith("Rivhit_Last_Sync"))
+			{
+				fSync = ks;
+			}
+			else if(ks.endsWith("Rivhit_Instalments_Total"))
+			{
+				fInstTotal = ks;
+			}
+			else if(ks.endsWith("Rivhit_Instalments_Elapsed"))
+			{
+				fInstElapsed = ks;
+			}
+			else if(ks.endsWith("Rivhit_Instalment_Progress"))
+			{
+				fInstProg = ks;
+			}
+			else if(ks.endsWith("Rivhit_Next_Instalment_Date"))
+			{
+				fInstNext = ks;
+			}
+			else if(ks.endsWith("Rivhit_Instalment_Amount"))
+			{
+				fInstAmt = ks;
+			}
+		}
+		dNum = ifnull(rc.get(fDocNum),0).toLong();
+		dType = ifnull(rc.get(fDocType),0).toLong();
+		rid = rc.get("id");
+		key = dType + "/" + dNum;
+		curStatus = ifnull(rc.get(fStatus),"").toString();
+		curPaid = ifnull(rc.get(fPaid),0).toDecimal();
+		if(openIndex.containsKey(key))
+		{
+			// Still open — take paid_amount straight from the report.
+			matched = matched + 1;
+			orow = openIndex.get(key);
+			rPaid = ifnull(orow.get("paid_amount"),0).toDecimal().round(2);
+			rTotal = ifnull(orow.get("total_amount"),0).toDecimal().round(2);
+			newStatus = "Issued";
+			if(rPaid > 0 && rPaid < rTotal - 0.01)
+			{
+				newStatus = "Partially Paid";
+			}
+			else if(rTotal > 0 && rPaid >= rTotal - 0.01)
+			{
+				newStatus = "Paid";
+			}
+			if(newStatus != curStatus || (rPaid - curPaid).abs() > 0.001)
+			{
+				try
+				{
+					u = Map();
+					u.put(fStatus,newStatus);
+					u.put(fPaid,rPaid);
+					u.put(fIsClosed,false);
+					zoho.crm.updateRecord(mod,rid.toLong(),u);
+					updatedCount = updatedCount + 1;
+				}
+				catch (ue)
+				{
+					info "rv_reconcile: update failed for " + mod + "/" + rid;
+				}
+				try
+				{
+					u2 = Map();
+					u2.put(fSync,zoho.currenttime);
+					zoho.crm.updateRecord(mod,rid.toLong(),u2);
+				}
+				catch (ue2)
+				{
+					info "rv_reconcile: timestamp skipped";
+				}
+			}
+		}
+		else
+		{
+			// Absent from the open list. Either it closed since the last run, or
+			// it fell outside the window. Confirm with Document.Details — but only
+			// within the budget; the rest carry over to the next run.
+			needsDetail = (curStatus != "Paid" && curStatus != "Cancelled");
+			confMissing = ifnull(rc.get(fConfSt),"").toString() == "Missing";
+			if(needsDetail || confMissing)
+			{
+				if(detailCalls < DETAIL_BUDGET)
+				{
+					detailCalls = detailCalls + 1;
+					try
+					{
+						dp = Map();
+						dp.put("api_token",apiToken);
+						dp.put("document_type",dType);
+						dp.put("document_number",dNum);
+						dr = invokeurl
+						[
+							url :baseUrl + "Document.Details"
+							type :POST
+							parameters :dp.toString()
+							headers :{"Content-Type":"application/json"}
+						];
+						dec = -9999;
+						try
+						{
+							dec = ifnull(dr.get("error_code"),-9999).toLong();
+						}
+						catch (dpe)
+						{
+							dec = -9999;
+						}
+						if(dec == 0)
+						{
+							dd = ifnull(dr.get("data"),Map());
+							isClosed = ifnull(dd.get("is_closed"),false);
+							isCancelled = ifnull(dd.get("is_cancelled"),false);
+							docTotal = ifnull(dd.get("document_total"),0).toDecimal().round(2);
+							rcptTotal = ifnull(dd.get("receipt_total"),0).toDecimal().round(2);
+							confN = ifnull(dd.get("confirmation_number"),"").toString();
+							u = Map();
+							if(isCancelled)
+							{
+								u.put(fStatus,"Cancelled");
+								u.put(fIsClosed,true);
+							}
+							else if(isClosed || (docTotal > 0 && rcptTotal >= docTotal - 0.01))
+							{
+								u.put(fStatus,"Paid");
+								u.put(fPaid,if(rcptTotal > 0,rcptTotal,docTotal));
+								u.put(fPaidDate,zoho.currentdate.toString("yyyy-MM-dd"));
+								u.put(fIsClosed,true);
+								closedFound = closedFound + 1;
+							}
+							else if(rcptTotal > 0)
+							{
+								u.put(fStatus,"Partially Paid");
+								u.put(fPaid,rcptTotal);
+								u.put(fIsClosed,false);
+							}
+							if(confN != "" && confN != "0")
+							{
+								u.put(fConfNum,confN);
+								u.put(fConfSt,"Obtained");
+							}
+							if(!u.isEmpty())
+							{
+								try
+								{
+									zoho.crm.updateRecord(mod,rid.toLong(),u);
+									updatedCount = updatedCount + 1;
+								}
+								catch (ue3)
+								{
+									info "rv_reconcile: detail update failed for " + rid;
+								}
+							}
+							// Instalment progress from the document's own payment
+							// rows — not from counting IPNs (there is only one) and
+							// not from months elapsed since the charge.
+							payRows = ifnull(dd.get("payments"),List());
+							if(payRows.size() > 1)
+							{
+								totalRows = payRows.size();
+								elapsed = 0;
+								nextDate = "";
+								nextAmt = 0.0;
+								today = zoho.currentdate;
+								for each  prow in payRows
+								{
+									ds = ifnull(prow.get("due_date"),"").toString();
+									pd = null;
+									if(ds != "")
+									{
+										try
+										{
+											pd = ds.toDate("dd/MM/yyyy");
+										}
+										catch (pde)
+										{
+											pd = null;
+										}
+									}
+									if(pd != null)
+									{
+										if(pd <= today)
+										{
+											elapsed = elapsed + 1;
+										}
+										else if(nextDate == "")
+										{
+											nextDate = pd.toString("yyyy-MM-dd");
+											nextAmt = ifnull(prow.get("amount"),0).toDecimal().round(2);
+										}
+									}
+								}
+								if(elapsed < 1)
+								{
+									elapsed = 1;
+								}
+								try
+								{
+									ui = Map();
+									ui.put(fInstTotal,totalRows);
+									ui.put(fInstElapsed,elapsed);
+									ui.put(fInstProg,elapsed + "/" + totalRows);
+									if(nextDate != "")
+									{
+										ui.put(fInstNext,nextDate);
+										ui.put(fInstAmt,nextAmt);
+									}
+									zoho.crm.updateRecord(mod,rid.toLong(),ui);
+								}
+								catch (uie)
+								{
+									info "rv_reconcile: instalment fields skipped for " + rid;
+								}
+							}
+							try
+							{
+								u4 = Map();
+								u4.put(fSync,zoho.currenttime);
+								zoho.crm.updateRecord(mod,rid.toLong(),u4);
+							}
+							catch (u4e)
+							{
+								info "rv_reconcile: timestamp skipped";
+							}
+						}
+						else if(dec != -2)
+						{
+							info "rv_reconcile Document.Details " + key + ": " + ifnull(dr.get("debug_message"),"").toString();
+						}
+					}
+					catch (dte)
+					{
+						info "rv_reconcile Document.Details transport for " + key;
+					}
+				}
+				else
+				{
+					// Out of budget — carry it to the next scheduled run.
+					carry = Map();
+					carry.put("module",mod);
+					carry.put("id",rid.toString());
+					carry.put("type",dType);
+					carry.put("number",dNum);
+					newPending.add(carry);
+				}
+			}
+			if(confMissing)
+			{
+				confGaps = confGaps + 1;
+			}
+		}
+	}
+}
+
+// ── 4. Persist the cursor. An unfinished run says so. ──────────────────────
+state.put("pendingDetails",newPending);
+state.put("lastRun",zoho.currenttime.toString("yyyy-MM-dd'T'HH:mm:ssZ"));
+state.put("lastScanned",scanned);
+try
+{
+	zoho.crm.invokeConnector("crm.set",{"apiname":prefix + "Sync_State","value":state.toString()});
+}
+catch (sse)
+{
+	info "rv_reconcile: could not persist Sync_State: " + sse.toString();
+}
+info "rv_reconcile done: scanned=" + scanned + " matched=" + matched + " updated=" + updatedCount + " closed=" + closedFound + " detailCalls=" + detailCalls + " deferred=" + newPending.size() + " confGaps=" + confGaps;
+d = Map();
+d.put("scanned",scanned);
+d.put("openRows",openRows.size());
+d.put("matched",matched);
+d.put("updated",updatedCount);
+d.put("closedFound",closedFound);
+d.put("detailCalls",detailCalls);
+d.put("deferred",newPending.size());
+d.put("confirmationGaps",confGaps);
+d.put("windowDays",windowDays);
+out.put("ok",true);
+out.put("code",if(newPending.size() > 0,"partial","done"));
+out.put("message","סריקה הושלמה: " + scanned + " רשומות, " + updatedCount + " עודכנו" + if(newPending.size() > 0,", " + newPending.size() + " נדחו לריצה הבאה",""));
+out.put("data",d);
+return out.toString();
