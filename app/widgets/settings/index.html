@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>הגדרות רווחית</title>
+<link rel="stylesheet" href="../../rv-styles.css">
+<script src="https://live.zwidgets.com/js-sdk/1.5/ZohoEmbededAppSDK.min.js"></script>
+<script src="../../rv-api.js"></script>
+</head>
+<body>
+
+<h1>הגדרות רווחית</h1>
+<p class="sub">חיבור ל-Rivhit Online ול-iCredit, מיפוי סוגי מסמכים והרשאות.</p>
+
+<div id="bootError"></div>
+
+<div id="main" class="hidden">
+  <div id="modeBanner"></div>
+
+  <div class="tabs" role="tablist">
+    <button class="tab" id="tabConn"  role="tab" aria-selected="true"  aria-controls="panConn">חיבור</button>
+    <button class="tab" id="tabTypes" role="tab" aria-selected="false" aria-controls="panTypes">סוגי מסמכים ותשלום</button>
+    <button class="tab" id="tabDoc"   role="tab" aria-selected="false" aria-controls="panDoc">ברירות מחדל למסמך</button>
+    <button class="tab" id="tabIc"    role="tab" aria-selected="false" aria-controls="panIc">iCredit</button>
+    <button class="tab" id="tabPerm"  role="tab" aria-selected="false" aria-controls="panPerm">הרשאות</button>
+  </div>
+
+  <!-- ══════════════ חיבור ══════════════ -->
+  <section class="tabpanel" id="panConn" role="tabpanel">
+    <div class="card">
+      <div class="card-title">פרטי התחברות</div>
+      <div class="field">
+        <label for="apiToken">API Token</label>
+        <input type="password" id="apiToken" class="mono-in" autocomplete="off" placeholder="השאר ריק כדי לשמור את הקיים">
+        <div class="hint" id="tokenHint"></div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="companyId">מספר חברה (Company ID)</label>
+          <input type="text" id="companyId" class="mono-in">
+          <div class="hint">משמש לבניית קישורי PDF</div>
+        </div>
+        <div class="field">
+          <label for="accountMode">סוג חשבון</label>
+          <select id="accountMode">
+            <option value="demo">חשבון בדיקה (demo)</option>
+            <option value="production">חשבון ייצור</option>
+          </select>
+          <div class="hint">אין שרת sandbox נפרד ברווחית — הבחירה מתעדת באיזה חשבון מדובר</div>
+        </div>
+      </div>
+      <div class="field">
+        <label for="defaultLanguage">שפת ממשק ומסמכים</label>
+        <select id="defaultLanguage">
+          <option value="he">עברית</option>
+          <option value="en">English</option>
+        </select>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="btnTest">בדיקת חיבור</button>
+      </div>
+      <div id="testResult" style="margin-top:12px"></div>
+    </div>
+    <div class="card tight">
+      <div class="card-title">מכסה חודשית</div>
+      <div class="row">
+        <div class="field">
+          <label for="monthlyQuota">מכסת מסמכים חודשית</label>
+          <input type="number" id="monthlyQuota" min="0" placeholder="ריק = ללא התרעה">
+          <div class="hint">הפקת מסמכים מחויבת לפי כמות. השאר ריק אם ההפקה כלולה במנוי.</div>
+        </div>
+        <div class="field">
+          <label>שימוש בחודש הנוכחי</label>
+          <div id="usageBox" class="small muted">—</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════════ סוגי מסמכים ══════════════ -->
+  <section class="tabpanel" id="panTypes" role="tabpanel" hidden>
+    <div class="card">
+      <div class="card-title">קטלוג סוגי מסמכים</div>
+      <p class="small muted">הקטלוג נמשך מרווחית. ההרחבה תומכת בכל סוגי המסמכים שמוגדרים בחשבון — הבחירה נעשית בעת ההפקה.</p>
+      <div class="btn-row">
+        <button class="btn" id="btnRefreshTypes">רענון קטלוג מרווחית</button>
+        <span id="typesStamp" class="small muted" style="align-self:center"></span>
+      </div>
+      <div id="typesList" style="margin-top:12px"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">תפקידים מיוחדים</div>
+      <p class="small muted">רק שלושה סוגים דורשים מיפוי מפורש — בכל השאר הקוד מסתמך על הדגלים שרווחית מחזירה.</p>
+      <div class="field">
+        <label for="roleInvoice">ברירת מחדל בחשבוניות</label>
+        <select id="roleInvoice"></select>
+      </div>
+      <div class="field">
+        <label for="roleSalesOrder">ברירת מחדל בהזמנות רכש</label>
+        <select id="roleSalesOrder"></select>
+      </div>
+      <div class="field">
+        <label for="roleCredit">סוג מסמך מזכה (זיכוי)</label>
+        <select id="roleCredit"></select>
+        <div class="hint">משמש רק לזיכוי חלקי. ביטול מלא מטופל ע״י רווחית עצמה.</div>
+      </div>
+      <div class="field">
+        <label for="roleReceipt">סוג קבלה עצמאית</label>
+        <select id="roleReceipt"></select>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">מיפוי אמצעי תשלום</div>
+      <p class="small muted">קודי אמצעי התשלום שונים בין עסקים. ערכי אמצעי התשלום ב-CRM ממופים לקודי רווחית.</p>
+      <div id="payMapBox" class="matrix"></div>
+    </div>
+  </section>
+
+  <!-- ══════════════ ברירות מחדל ══════════════ -->
+  <section class="tabpanel" id="panDoc" role="tabpanel" hidden>
+    <div class="card">
+      <div class="card-title">מע״מ</div>
+      <div class="row">
+        <div class="field">
+          <label for="sortCodeVat">קוד מיון — חייב מע״מ</label>
+          <input type="number" id="sortCodeVat" value="100">
+        </div>
+        <div class="field">
+          <label for="sortCodeExempt">קוד מיון — פטור ממע״מ</label>
+          <input type="number" id="sortCodeExempt" value="150">
+        </div>
+      </div>
+      <div class="hint">ברירות המחדל של רווחית הן 100 / 150, אך הן ניתנות לשינוי לכל עסק. שיעור המע״מ עצמו נמשך מרווחית ואינו נקבע כאן.</div>
+      <div id="vatRateBox" class="small muted" style="margin-top:8px"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">מטבע ומלאי</div>
+      <div class="field">
+        <label for="defaultCurrencyId">מטבע ברירת מחדל</label>
+        <select id="defaultCurrencyId"></select>
+      </div>
+      <div class="check">
+        <input type="checkbox" id="defaultUpdateInventory" checked>
+        <label for="defaultUpdateInventory">עדכון מלאי כברירת מחדל
+          <span class="hint">ניתן לשינוי בכל מסמך בנפרד בעת ההפקה</span></label>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">שליחה וחתימה</div>
+      <div class="check">
+        <input type="checkbox" id="sendMailDefault">
+        <label for="sendMailDefault">שליחת המסמך ללקוח במייל כברירת מחדל
+          <span class="hint">שים לב: אם iCredit מפיקה את המסמך, היא גם שולחת אותו — סמן כאן רק אם ההרחבה היא ששולחת</span></label>
+      </div>
+      <div class="check">
+        <input type="checkbox" id="digitalSignature">
+        <label for="digitalSignature">חתימה דיגיטלית על מסמכים
+          <span class="hint">מחייב הפעלת מודול החתימה הדיגיטלית ברווחית</span></label>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">חשבוניות ישראל (מספר הקצאה)</div>
+      <div class="check">
+        <input type="checkbox" id="confirmationRequired">
+        <label for="confirmationRequired">העסק כפוף למנגנון מספרי הקצאה
+          <span class="hint">חובה שהחיבור לרשות המסים יופעל ברווחית תחת אותו משתמש שבבעלותו ה-API Token, אחרת לא יתקבלו מספרי הקצאה כלל</span></label>
+      </div>
+      <div class="field">
+        <label for="approverId">ת.ז של המאשר</label>
+        <input type="text" id="approverId" class="mono-in">
+        <div class="hint">נדרש לבקשת מספר הקצאה בדיעבד</div>
+      </div>
+    </div>
+    <div class="card tight">
+      <div class="field">
+        <label for="reconcileWindowDays">חלון ההתאמה המתוזמנת (ימים)</label>
+        <input type="number" id="reconcileWindowDays" value="35" min="1" max="180">
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════════ iCredit ══════════════ -->
+  <section class="tabpanel" id="panIc" role="tabpanel" hidden>
+    <div class="card">
+      <div class="check">
+        <input type="checkbox" id="icreditEnabled">
+        <label for="icreditEnabled">הפעלת סליקת אשראי דרך iCredit</label>
+      </div>
+      <div class="check">
+        <input type="checkbox" id="icreditTestMode" checked>
+        <label for="icreditTestMode">מצב בדיקה
+          <span class="hint">משתמש ב-testicredit.rivhit.co.il ובאסימון הבדיקה</span></label>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="icreditTokenTest">GroupPrivateToken — בדיקה</label>
+          <input type="password" id="icreditTokenTest" class="mono-in" autocomplete="off" placeholder="השאר ריק כדי לשמור את הקיים">
+        </div>
+        <div class="field">
+          <label for="icreditTokenProd">GroupPrivateToken — ייצור</label>
+          <input type="password" id="icreditTokenProd" class="mono-in" autocomplete="off" placeholder="השאר ריק כדי לשמור את הקיים">
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">מי מפיק את מסמך המס?</div>
+      <div class="check">
+        <input type="checkbox" id="icreditIssuesDocument" checked>
+        <label for="icreditIssuesDocument">iCredit מפיקה את המסמך בעצמה</label>
+      </div>
+      <div id="icModeExplain" class="alert alert-warn" style="margin-top:10px"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">כתובות IPN</div>
+      <p class="small muted">יש להדביק את שתי הכתובות בממשק הניהול של iCredit. ללא כתובת נפרדת לכשלונות, הודעות על חיוב שנכשל מגיעות לכתובת ההצלחה — פעם אחת לכל ניסיון כושל.</p>
+      <div class="field">
+        <label for="ipnUrl">IPNURL (הצלחה)</label>
+        <input type="text" id="ipnUrl" class="mono-in" placeholder="https://www.zohoapis.com/crm/v2/functions/rv_icredit_ipn/actions/execute?auth_type=apikey&zapikey=...">
+      </div>
+      <div class="field">
+        <label for="ipnFailUrl">IPNFailureURL (כשלון)</label>
+        <input type="text" id="ipnFailUrl" class="mono-in">
+      </div>
+      <div class="field">
+        <label for="redirectUrl">RedirectURL (דף תודה)</label>
+        <input type="text" id="redirectUrl" class="mono-in">
+      </div>
+      <div class="alert alert-info small">
+        iCredit דורשת תשובת 200 תוך 1.25 שניות ואחרת שולחת שוב. פונקציית Deluge לרוב לא תספיק —
+        לכן הודעות כפולות הן תעבורה רגילה, וההגנה מפני כפילות בנויה על שדה ייחודי במודול הקבלות.
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════════ הרשאות ══════════════ -->
+  <section class="tabpanel" id="panPerm" role="tabpanel" hidden>
+    <div class="card">
+      <div class="card-title">הרשאות לפי פרופיל</div>
+      <p class="small muted">
+        האכיפה מתבצעת בצד השרת בכל פונקציה — הסתרת כפתור אינה הרשאה.
+        המטריצה יכולה רק <strong>לצמצם</strong>: משתמש שאין לו הרשאת עריכה ב-Zoho לא יקבל אותה כאן.
+      </p>
+      <div id="permMatrix" class="matrix"></div>
+      <div class="alert alert-info small" style="margin-top:12px">
+        לא ניתן להסיר לעצמך את ההרשאה לשמור הגדרות — שמירה שנועלת את כולם החוצה משביתה את ההרחבה.
+      </div>
+    </div>
+  </section>
+
+  <div class="btn-row" style="position:sticky;bottom:0;background:var(--paper);padding:12px 0;border-top:1px solid var(--rule)">
+    <button class="btn btn-primary" id="btnSave">שמירת הגדרות</button>
+    <button class="btn btn-ghost" id="btnReload">טעינה מחדש</button>
+    <span id="saveResult" style="align-self:center"></span>
+  </div>
+</div>
+
+<script>
+(function () {
+  var R = RivhitAPI;
+  var S = {}, PROFILES = [], PAY_VALUES = [];
+
+  var ACTIONS = [
+    ['issueDocument',  'הפקת מסמך'],
+    ['recordPayment',  'רישום תשלום / קבלה'],
+    ['closeDocument',  'סגירה ידנית / פתיחה מחדש'],
+    ['cancelDocument', 'ביטול מסמך'],
+    ['paymentLink',    'יצירת קישור תשלום'],
+    ['confirmation',   'בקשת מספר הקצאה'],
+    ['syncCustomers',  'סנכרון לקוחות'],
+    ['syncProducts',   'סנכרון פריטים'],
+    ['saveSettings',   'שמירת הגדרות'],
+    ['viewReports',    'צפייה בדוחות']
+  ];
+
+  function tabs() {
+    var map = { tabConn: 'panConn', tabTypes: 'panTypes', tabDoc: 'panDoc', tabIc: 'panIc', tabPerm: 'panPerm' };
+    Object.keys(map).forEach(function (tid) {
+      document.getElementById(tid).addEventListener('click', function () {
+        Object.keys(map).forEach(function (o) {
+          var sel = (o === tid);
+          document.getElementById(o).setAttribute('aria-selected', sel ? 'true' : 'false');
+          document.getElementById(map[o]).hidden = !sel;
+        });
+      });
+    });
+  }
+
+  function renderModeBanner() {
+    var prod = S.accountMode === 'production';
+    document.getElementById('modeBanner').innerHTML = R.alertHtml(
+      prod ? 'error' : 'warn',
+      prod ? 'חשבון ייצור — כל הפקה יוצרת מסמך משפטי אמיתי' : 'חשבון בדיקה',
+      prod ? 'אין ברווחית שרת sandbox נפרד. ודא שזה החשבון הנכון לפני הפקה.'
+           : 'הנתונים בחשבון הבדיקה גלויים לכל משתמשי הבדיקה, והוא אינו מחובר ל-iCredit.'
+    );
+  }
+
+  function renderTypes() {
+    var list = S.documentTypes || [];
+    var box = document.getElementById('typesList');
+    if (!list.length) {
+      box.innerHTML = R.alertHtml('warn', 'הקטלוג טרם נטען', 'לחץ "רענון קטלוג מרווחית".');
+      return;
+    }
+    var h = '<div class="t-wrap"><table><thead><tr>' +
+            '<th>קוד</th><th>שם</th><th>חשבונית מס קבלה</th><th>חשבונאי</th><th>מחיר כולל מע״מ</th>' +
+            '</tr></thead><tbody>';
+    list.forEach(function (d) {
+      h += '<tr><td>' + R.ltrHtml(d.document_type) + '</td>' +
+           '<td>' + R.esc(d.document_name) + '</td>' +
+           '<td>' + (d.is_invoice_receipt ? '<span class="chip chip-warn">דורש תשלום</span>' : '—') + '</td>' +
+           '<td>' + (d.is_accounting ? '<span class="chip chip-accent">כן</span>' : '—') + '</td>' +
+           '<td>' + (d.price_include_vat ? 'כן' : 'לא') + '</td></tr>';
+    });
+    box.innerHTML = h + '</tbody></table></div>';
+    document.getElementById('typesStamp').textContent =
+      S.typesCachedAt ? ('עודכן: ' + R.displayDateTime(S.typesCachedAt)) : '';
+
+    var roles = S.roles || {};
+    R.fillSelect('roleInvoice',    list, 'document_type', 'document_name', roles.role_default_invoice);
+    R.fillSelect('roleSalesOrder', list, 'document_type', 'document_name', roles.role_default_sales_order);
+    R.fillSelect('roleCredit',     list, 'document_type', 'document_name', roles.role_credit);
+    var rts = (S.receiptTypes || []).filter(function (r) { return !r.is_invoice_receipt; });
+    R.fillSelect('roleReceipt', rts, 'receipt_type', 'receipt_name', roles.role_default_receipt);
+
+    if (S.vatRate) {
+      document.getElementById('vatRateBox').textContent = 'שיעור מע״מ נוכחי לפי רווחית: ' + S.vatRate + '%';
+    }
+    var curs = (S.currencies || []).map(function (c) {
+      return { id: c.currency_id, name: c.currency_name + ' (' + c.iso_code + ')' };
+    });
+    if (!curs.length) curs = [{ id: 1, name: 'ש״ח (ILS)' }];
+    R.fillSelect('defaultCurrencyId', curs, 'id', 'name', S.defaultCurrencyId);
+  }
+
+  async function renderPayMap() {
+    var box = document.getElementById('payMapBox');
+    var rvTypes = S.paymentTypes || [];
+    if (!rvTypes.length) { box.innerHTML = '<p class="small muted">רענן את הקטלוג כדי למפות אמצעי תשלום.</p>'; return; }
+    if (!PAY_VALUES.length) {
+      try {
+        var meta = await ZOHO.CRM.META.getFields({ Entity: 'Invoices' });
+        (meta.fields || []).forEach(function (f) {
+          if (f.api_name === 'Payment_Method' || /payment.*method/i.test(f.api_name)) {
+            (f.pick_list_values || []).forEach(function (p) { PAY_VALUES.push(p.actual_value || p.display_value); });
+          }
+        });
+      } catch (e) { R.dbg('payment picklist read failed', e); }
+    }
+    if (!PAY_VALUES.length) PAY_VALUES = ['מזומן', 'שיק', 'כרטיס אשראי', 'העברה בנקאית'];
+    var cur = S.paymentTypeMap || {};
+    var h = '<div class="t-wrap"><table><thead><tr><th>ערך ב-CRM</th><th>קוד רווחית</th></tr></thead><tbody>';
+    PAY_VALUES.forEach(function (v, i) {
+      h += '<tr><td>' + R.esc(v) + '</td><td><select data-payval="' + R.esc(v) + '" id="pm_' + i + '">';
+      h += '<option value="">— לא ממופה —</option>';
+      rvTypes.forEach(function (t) {
+        var sel = String(cur[v]) === String(t.payment_type) ? ' selected' : '';
+        h += '<option value="' + R.esc(t.payment_type) + '"' + sel + '>' +
+             R.esc(t.payment_name) + ' (' + R.esc(t.payment_type) + ')</option>';
+      });
+      h += '</select></td></tr>';
+    });
+    box.innerHTML = h + '</tbody></table></div>';
+  }
+
+  async function renderPermissions() {
+    var box = document.getElementById('permMatrix');
+    if (!PROFILES.length) {
+      try {
+        var d = await R.callFn('rv_lookup', { op: 'profiles' });
+        PROFILES = d.profiles || [];
+      } catch (e) { R.dbg('profiles failed', e); }
+    }
+    if (!PROFILES.length) {
+      box.innerHTML = R.alertHtml('warn', 'לא ניתן לטעון פרופילים',
+        'ודא שההרשאה ZohoCRM.settings.profiles.READ אושרה. עד אז האכיפה בצד השרת ממשיכה לפי ההגדרה השמורה.');
+      return;
+    }
+    var perms = S.permissions || {};
+    var h = '<div class="t-wrap"><table><thead><tr><th>פעולה</th>';
+    PROFILES.forEach(function (p) { h += '<th>' + R.esc(p.name) + '</th>'; });
+    h += '</tr></thead><tbody>';
+    ACTIONS.forEach(function (a) {
+      h += '<tr><td>' + R.esc(a[1]) + '</td>';
+      PROFILES.forEach(function (p) {
+        var allowed = perms[a[0]];
+        var on = !allowed || !allowed.length
+               ? (a[0] === 'viewReports')
+               : (allowed.indexOf(p.id) >= 0 || allowed.indexOf(p.name) >= 0);
+        if ((!allowed || !allowed.length) && /admin/i.test(p.name)) on = true;
+        h += '<td><input type="checkbox" data-act="' + R.esc(a[0]) + '" data-prof="' + R.esc(p.id) + '"' +
+             (on ? ' checked' : '') + '></td>';
+      });
+      h += '</tr>';
+    });
+    box.innerHTML = h + '</tbody></table></div>';
+  }
+
+  function renderIcExplain() {
+    var on = R.checked('icreditIssuesDocument');
+    document.getElementById('icModeExplain').innerHTML = on
+      ? '<strong>iCredit מפיקה — ההרחבה לא</strong><div class="detail">' +
+        'כאשר לקוח משלם דרך קישור, iCredit מפיקה את מסמך המס ושולחת אותו. ההרחבה רק רושמת אותו ב-CRM ואינה מפיקה מסמך נוסף. ' +
+        'כפתור "הפקת מסמך" ייחסם ברשומה שיש לה קישור תשלום פעיל, כדי שלא ייווצרו שני מסמכי מס לאותה עסקה.</div>'
+      : '<strong>ההרחבה מפיקה — iCredit לא</strong><div class="detail">' +
+        'לאחר תשלום מוצלח ההרחבה תפיק קבלה ברווחית ותסגור את המסמך. ודא שדף התשלום ב-iCredit מוגדר שלא להפיק מסמך, אחרת יופקו שניים.</div>';
+  }
+
+  function fill() {
+    document.getElementById('tokenHint').textContent =
+      S.apiTokenMasked ? ('אסימון שמור: ' + S.apiTokenMasked) : 'טרם הוזן אסימון';
+    document.getElementById('companyId').value = S.companyId || '';
+    document.getElementById('accountMode').value = S.accountMode || 'demo';
+    document.getElementById('defaultLanguage').value = S.defaultLanguage || 'he';
+    document.getElementById('monthlyQuota').value = S.monthlyQuota || '';
+    document.getElementById('sortCodeVat').value = S.sortCodeVat || 100;
+    document.getElementById('sortCodeExempt').value = S.sortCodeExempt || 150;
+    document.getElementById('defaultUpdateInventory').checked = !!S.defaultUpdateInventory;
+    document.getElementById('sendMailDefault').checked = !!S.sendMailDefault;
+    document.getElementById('digitalSignature').checked = !!S.digitalSignature;
+    document.getElementById('confirmationRequired').checked = !!S.confirmationRequired;
+    document.getElementById('reconcileWindowDays').value = S.reconcileWindowDays || 35;
+    document.getElementById('icreditEnabled').checked = !!S.icreditEnabled;
+    document.getElementById('icreditTestMode').checked = S.icreditTestMode !== false;
+    document.getElementById('icreditIssuesDocument').checked = S.icreditIssuesDocument !== false;
+    document.getElementById('ipnUrl').value = S.ipnUrl || '';
+    document.getElementById('ipnFailUrl').value = S.ipnFailUrl || '';
+    document.getElementById('redirectUrl').value = S.redirectUrl || '';
+    document.getElementById('approverId').value = S.approverId || '';
+    var u = S.usage || {};
+    var q = parseInt(S.monthlyQuota || '0', 10);
+    var c = parseInt(u.count || 0, 10);
+    var txt = u.month ? (u.month + ': ' + c + ' מסמכים') : 'אין נתונים';
+    if (q > 0) txt += ' מתוך ' + q + (c >= q * 0.8 ? '  ⚠ מתקרב למכסה' : '');
+    document.getElementById('usageBox').textContent = txt;
+    renderModeBanner();
+    renderTypes();
+    renderIcExplain();
+  }
+
+  function collect() {
+    var roles = {
+      role_default_invoice:     R.val('roleInvoice'),
+      role_default_sales_order: R.val('roleSalesOrder'),
+      role_credit:              R.val('roleCredit'),
+      role_default_receipt:     R.val('roleReceipt')
+    };
+    var payMap = {};
+    document.querySelectorAll('[data-payval]').forEach(function (el) {
+      if (el.value) payMap[el.getAttribute('data-payval')] = el.value;
+    });
+    var perms = {};
+    document.querySelectorAll('[data-act]').forEach(function (el) {
+      var a = el.getAttribute('data-act');
+      if (!perms[a]) perms[a] = [];
+      if (el.checked) perms[a].push(el.getAttribute('data-prof'));
+    });
+    return {
+      apiToken: R.val('apiToken'),
+      companyId: R.val('companyId'),
+      accountMode: R.val('accountMode'),
+      defaultLanguage: R.val('defaultLanguage'),
+      monthlyQuota: R.val('monthlyQuota'),
+      sortCodeVat: R.val('sortCodeVat'),
+      sortCodeExempt: R.val('sortCodeExempt'),
+      defaultCurrencyId: R.val('defaultCurrencyId'),
+      defaultUpdateInventory: R.checked('defaultUpdateInventory') ? 'true' : 'false',
+      sendMailDefault: R.checked('sendMailDefault') ? 'true' : 'false',
+      digitalSignature: R.checked('digitalSignature') ? 'true' : 'false',
+      confirmationRequired: R.checked('confirmationRequired') ? 'true' : 'false',
+      approverId: R.val('approverId'),
+      reconcileWindowDays: R.val('reconcileWindowDays'),
+      icreditEnabled: R.checked('icreditEnabled') ? 'true' : 'false',
+      icreditTestMode: R.checked('icreditTestMode') ? 'true' : 'false',
+      icreditIssuesDocument: R.checked('icreditIssuesDocument') ? 'true' : 'false',
+      icreditTokenProd: R.val('icreditTokenProd'),
+      icreditTokenTest: R.val('icreditTokenTest'),
+      ipnUrl: R.val('ipnUrl'),
+      ipnFailUrl: R.val('ipnFailUrl'),
+      redirectUrl: R.val('redirectUrl'),
+      roles: roles,
+      paymentTypeMap: payMap,
+      permissions: perms
+    };
+  }
+
+  async function init() {
+    try {
+      await R.boot({ entities: ['Invoices'] });
+      S = R.settings();
+      tabs();
+      fill();
+      await renderPayMap();
+      await renderPermissions();
+      R.show('main', true);
+
+      R.on('btnTest', 'click', async function () {
+        R.setHtml('testResult', '<span class="spinner"></span> בודק…');
+        try {
+          var save = collect();
+          await R.callFn('rv_save_settings', { settings: save });
+          var d = await R.callFn('rv_lookup', { op: 'ping' });
+          var name = (d && (d.company_name || d.name)) || '';
+          R.setHtml('testResult', R.alertHtml('ok', 'החיבור תקין' + (name ? ' — ' + name : ''),
+            'האסימון התקבל על ידי רווחית.'));
+          S = await R.loadSettings(true);
+          fill();
+        } catch (e) {
+          R.setHtml('testResult', R.alertHtml('error', 'החיבור נכשל', (e && e.message) || ''));
+        }
+      });
+
+      R.on('btnRefreshTypes', 'click', async function () {
+        R.setHtml('typesList', '<span class="spinner"></span> מרענן…');
+        try {
+          await R.callFn('rv_lookup', { op: 'types' });
+          S = await R.loadSettings(true);
+          renderTypes();
+          await renderPayMap();
+        } catch (e) { R.showError('typesList', e); }
+      });
+
+      R.on('icreditIssuesDocument', 'change', renderIcExplain);
+      R.on('accountMode', 'change', function () { S.accountMode = R.val('accountMode'); renderModeBanner(); });
+
+      R.on('btnSave', 'click', async function () {
+        R.setHtml('saveResult', '<span class="spinner"></span> שומר…');
+        try {
+          var res = await R.callFn('rv_save_settings', { settings: collect() });
+          var warn = res && res.selfLockoutPrevented;
+          R.setHtml('saveResult', '<span class="chip chip-ok">נשמר</span>' +
+            (warn ? ' <span class="chip chip-warn">הרשאת ההגדרות שלך נשמרה אוטומטית</span>' : ''));
+          document.getElementById('apiToken').value = '';
+          document.getElementById('icreditTokenProd').value = '';
+          document.getElementById('icreditTokenTest').value = '';
+          S = await R.loadSettings(true);
+          fill();
+        } catch (e) {
+          R.setHtml('saveResult', '<span class="chip chip-err">' + R.esc((e && e.message) || 'שגיאה') + '</span>');
+        }
+      });
+
+      R.on('btnReload', 'click', async function () {
+        S = await R.loadSettings(true);
+        fill();
+        await renderPayMap();
+      });
+    } catch (e) {
+      R.showError('bootError', e);
+    }
+  }
+  init();
+})();
+</script>
+</body>
+</html>

@@ -180,9 +180,13 @@ writes.put("Digital_Signature",ifnull(inSettings.get("digitalSignature"),"false"
 writes.put("Confirmation_Required",ifnull(inSettings.get("confirmationRequired"),"false").toString());
 writes.put("Monthly_Doc_Quota",ifnull(inSettings.get("monthlyQuota"),"").toString());
 writes.put("Reconcile_Window_Days",ifnull(inSettings.get("reconcileWindowDays"),"35").toString());
+writes.put("Approver_ID_Number",ifnull(inSettings.get("approverId"),"").toString());
 writes.put("ICredit_Enabled",ifnull(inSettings.get("icreditEnabled"),"false").toString());
 writes.put("ICredit_Issues_Document",ifnull(inSettings.get("icreditIssuesDocument"),"true").toString());
 writes.put("ICredit_Test_Mode",ifnull(inSettings.get("icreditTestMode"),"true").toString());
+writes.put("ICredit_IPN_URL",ifnull(inSettings.get("ipnUrl"),"").toString());
+writes.put("ICredit_IPN_Failure_URL",ifnull(inSettings.get("ipnFailUrl"),"").toString());
+writes.put("ICredit_Redirect_URL",ifnull(inSettings.get("redirectUrl"),"").toString());
 rolesIn = ifnull(inSettings.get("roles"),Map());
 writes.put("Doc_Type_Roles",rolesIn.toString());
 payMapIn = ifnull(inSettings.get("paymentTypeMap"),Map());

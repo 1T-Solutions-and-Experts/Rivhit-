@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>סנכרון פריטים לרווחית</title>
+<link rel="stylesheet" href="../../rv-styles.css">
+<script src="https://live.zwidgets.com/js-sdk/1.5/ZohoEmbededAppSDK.min.js"></script>
+<script src="../../rv-api.js"></script>
+</head>
+<body>
+
+<div id="loading" class="center" style="padding:40px 0"><span class="spinner lg"></span><div class="muted">טוען…</div></div>
+<div id="err" class="hidden"></div>
+
+<div id="main" class="hidden">
+  <h1>סנכרון פריטים לרווחית</h1>
+  <p class="sub" id="sub"></p>
+
+  <div class="card tight">
+    <div class="check">
+      <input type="checkbox" id="pullStock">
+      <label for="pullStock">משיכת יתרות מלאי מרווחית
+        <span class="hint">מוסיף קריאה לכל פריט — הסנכרון יתקדם באצוות קטנות יותר</span></label>
+    </div>
+  </div>
+
+  <div class="card tight">
+    <div class="bar"><i id="bar" style="width:0%"></i></div>
+    <div class="bar-label" id="progress">מוכן</div>
+  </div>
+
+  <div id="summary"></div>
+  <div id="resultTable"></div>
+
+  <div class="btn-row">
+    <button class="btn btn-primary" id="btnStart">התחלת סנכרון</button>
+    <button class="btn" id="btnContinue" style="display:none">המשך</button>
+    <button class="btn btn-ghost" id="btnClose">סגירה</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  var R = RivhitAPI;
+  var ALL = [], queue = [], totals = { created: 0, updated: 0, failed: 0 }, rows = [];
+
+  function paint() {
+    var doneN = ALL.length - queue.length;
+    var pct = ALL.length ? Math.round(doneN / ALL.length * 100) : 0;
+    document.getElementById('bar').style.width = pct + '%';
+    R.setText('progress', doneN + ' מתוך ' + ALL.length + ' (' + pct + '%)');
+    R.setHtml('summary',
+      '<div class="card tight"><span class="chip chip-ok">נוצרו ' + totals.created + '</span> ' +
+      '<span class="chip chip-accent">עודכנו ' + totals.updated + '</span> ' +
+      '<span class="chip ' + (totals.failed ? 'chip-err' : 'chip-neutral') + '">נכשלו ' + totals.failed + '</span></div>');
+    if (rows.length) {
+      var withStock = R.checked('pullStock');
+      var h = '<div class="t-wrap"><table><thead><tr><th>פריט</th><th>תוצאה</th><th>מזהה רווחית</th>' +
+              (withStock ? '<th class="n">מלאי</th>' : '') + '<th>הערה</th></tr></thead><tbody>';
+      rows.slice(-60).forEach(function (r) {
+        var chip = r.status === 'created' ? '<span class="chip chip-ok">נוצר</span>'
+                 : r.status === 'updated' ? '<span class="chip chip-accent">עודכן</span>'
+                 : '<span class="chip chip-err">נכשל</span>';
+        h += '<tr><td>' + R.esc(r.name || r.id) + '</td><td>' + chip + '</td>' +
+             '<td>' + (r.itemId ? R.ltrHtml(r.itemId) : '—') + '</td>' +
+             (withStock ? '<td class="n">' + (r.onHand != null ? R.ltrHtml(r.onHand) : '—') + '</td>' : '') +
+             '<td class="small muted">' + R.esc(r.error || '') + '</td></tr>';
+      });
+      R.setHtml('resultTable', h + '</tbody></table></div>');
+    }
+  }
+
+  async function runBatch() {
+    document.getElementById('btnStart').disabled = true;
+    document.getElementById('btnContinue').disabled = true;
+    R.setText('progress', 'מסנכרן…');
+    try {
+      var d = await R.callFn('rv_sync_products', {
+        ids: queue,
+        pullStock: R.checked('pullStock'),
+        batchSize: R.checked('pullStock') ? 8 : 12
+      });
+      totals.created += d.created || 0;
+      totals.updated += d.updated || 0;
+      totals.failed  += d.failed  || 0;
+      rows = rows.concat(d.results || []);
+      queue = d.remaining || [];
+      paint();
+      if (queue.length) {
+        document.getElementById('btnContinue').style.display = '';
+        document.getElementById('btnContinue').disabled = false;
+        R.setText('progress', (ALL.length - queue.length) + ' מתוך ' + ALL.length +
+                  ' — נותרו ' + queue.length + '. לחץ "המשך".');
+      } else {
+        document.getElementById('btnContinue').style.display = 'none';
+        R.setText('progress', 'הסתיים — ' + ALL.length + ' פריטים');
+      }
+    } catch (e) {
+      R.showError('summary', e);
+      document.getElementById('btnStart').disabled = false;
+    }
+  }
+
+  async function init() {
+    try {
+      var CTX = await R.boot({ entities: ['Products'] });
+      ALL = (CTX.ids || []).slice();
+      queue = ALL.slice();
+      R.show('loading', false);
+      if (!R.isConfigured()) {
+        R.show('err', true);
+        R.setHtml('err', R.alertHtml('error', R.t('notConfigured'), ''));
+        return;
+      }
+      if (!ALL.length) {
+        R.show('err', true);
+        R.setHtml('err', R.alertHtml('warn', 'לא נבחרו פריטים', 'בחר פריטים ברשימה והפעל שוב.'));
+        return;
+      }
+      R.setText('sub', ALL.length + ' פריטים נבחרו');
+      R.show('main', true);
+      R.gate('syncProducts', 'btnStart');
+      paint();
+      R.on('btnStart', 'click', runBatch);
+      R.on('btnContinue', 'click', runBatch);
+      R.on('btnClose', 'click', R.closeReload);
+    } catch (e) {
+      R.show('loading', false); R.show('err', true); R.showError('err', e);
+    }
+  }
+  init();
+})();
+</script>
+</body>
+</html>

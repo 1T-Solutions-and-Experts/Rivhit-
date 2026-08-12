@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>רישום תשלום</title>
+<link rel="stylesheet" href="../../rv-styles.css">
+<script src="https://live.zwidgets.com/js-sdk/1.5/ZohoEmbededAppSDK.min.js"></script>
+<script src="../../rv-api.js"></script>
+</head>
+<body>
+
+<div id="loading" class="center" style="padding:40px 0"><span class="spinner lg"></span><div class="muted">טוען…</div></div>
+<div id="err" class="hidden"></div>
+
+<div id="main" class="hidden">
+  <h1>רישום תשלום</h1>
+  <p class="sub" id="sub"></p>
+
+  <div class="card tight">
+    <dl class="kv" id="docKv"></dl>
+  </div>
+
+  <div class="tabs" role="tablist">
+    <button class="tab" id="tabReceipt" role="tab" aria-selected="true">הפקת קבלה</button>
+    <button class="tab" id="tabManual"  role="tab" aria-selected="false">סגירה ידנית</button>
+  </div>
+
+  <!-- קבלה -->
+  <section class="tabpanel" id="panReceipt" role="tabpanel">
+    <div class="card">
+      <div class="row">
+        <div class="field">
+          <label for="amount">סכום</label>
+          <input type="number" id="amount" step="0.01" min="0.01">
+          <div class="hint" id="amountHint"></div>
+        </div>
+        <div class="field">
+          <label for="receiptType">סוג קבלה</label>
+          <select id="receiptType"></select>
+        </div>
+      </div>
+      <div class="field">
+        <label for="payType">אמצעי תשלום</label>
+        <select id="payType"></select>
+      </div>
+      <div id="payFields"></div>
+      <div class="field">
+        <label for="comments">הערה</label>
+        <textarea id="comments" maxlength="400"></textarea>
+      </div>
+      <div class="check">
+        <input type="checkbox" id="sendMail">
+        <label for="sendMail">שליחת הקבלה ללקוח במייל</label>
+      </div>
+    </div>
+    <div id="receiptResult"></div>
+    <div class="btn-row">
+      <button class="btn" id="btnDry">בדיקה בלבד</button>
+      <button class="btn btn-primary" id="btnIssue">הפקת קבלה</button>
+      <button class="btn btn-ghost" id="btnCancel1">סגירה</button>
+    </div>
+    <p class="small muted" style="margin-top:8px">הפקת קבלה נספרת במכסה החודשית ואינה הפיכה.</p>
+  </section>
+
+  <!-- סגירה ידנית -->
+  <section class="tabpanel" id="panManual" role="tabpanel" hidden>
+    <div class="card">
+      <div class="alert alert-info small">
+        סגירה ידנית מסמנת את המסמך כמסולק ברווחית מבלי להפיק קבלה. מתאימה לתשלום שסולק כולו מחוץ למערכת.
+        אינה נספרת במכסה החודשית.
+      </div>
+      <div class="field">
+        <label for="manualAmount">סכום לסגירה</label>
+        <input type="number" id="manualAmount" step="0.01" min="0">
+        <div class="hint">ריק = סגירת מלוא היתרה</div>
+      </div>
+      <div class="field">
+        <label for="manualDate">תאריך סגירה</label>
+        <input type="date" id="manualDate">
+      </div>
+    </div>
+    <div id="manualResult"></div>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btnManual">סגירה ידנית</button>
+      <button class="btn btn-ghost" id="btnReopen">פתיחה מחדש</button>
+      <button class="btn btn-ghost" id="btnCancel2">סגירה</button>
+    </div>
+  </section>
+</div>
+
+<div id="done" class="hidden center">
+  <div style="font-size:42px">✅</div>
+  <h1 id="doneTitle">בוצע</h1>
+  <div class="card" style="text-align:start"><dl class="kv" id="doneKv"></dl></div>
+  <div class="btn-row" style="justify-content:center">
+    <a id="doneLink" class="btn btn-primary" target="_blank" rel="noopener">פתיחת הקבלה</a>
+    <button class="btn btn-ghost" id="btnDoneClose">סגירה</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  var R = RivhitAPI;
+  var CTX, REC, S = {}, outstanding = 0, curId = 1;
+  function f(k) { return R.getField(CTX.module, REC, k); }
+
+  function payFieldsFor(code) {
+    var t = (S.paymentTypes || []).filter(function (p) { return String(p.payment_type) === String(code); })[0];
+    var name = (t && t.payment_name) || '', n = Number(code), h = '';
+    function inp(id, label, type) {
+      return '<div class="field"><label for="' + id + '">' + R.esc(label) + '</label>' +
+             '<input type="' + (type || 'text') + '" id="' + id + '" class="mono-in"></div>';
+    }
+    var isCheck    = n === 1 || /שיק|צ'ק|check/i.test(name);
+    var isCard     = (n >= 4 && n <= 8) || /אשראי|ויזה|ישראכרט|card/i.test(name);
+    var isTransfer = n === 9 || /העברה|transfer/i.test(name);
+    if (isCheck) {
+      h = '<div class="row">' + inp('pd_bank_code', 'קוד בנק', 'number') + inp('pd_branch_number', 'סניף', 'number') + '</div>' +
+          '<div class="row">' + inp('pd_bank_account_number', 'מספר חשבון') + inp('pd_check_number', 'מספר שיק', 'number') + '</div>' +
+          inp('pd_due_date_disp', 'תאריך פירעון (dd/mm/yyyy)');
+    } else if (isCard) {
+      h = '<div class="row">' + inp('pd_bank_account_number', '4 ספרות אחרונות', 'number') +
+          inp('pd_check_number', 'מספר שובר', 'number') + '</div>' + inp('pd_np', 'מספר תשלומים', 'number');
+    } else if (isTransfer) {
+      h = '<div class="row">' + inp('pd_bank_code', 'קוד בנק', 'number') + inp('pd_branch_number', 'סניף', 'number') + '</div>' +
+          '<div class="row">' + inp('pd_bank_account_number', 'מספר חשבון') + inp('pd_check_number', 'אסמכתא', 'number') + '</div>';
+    }
+    R.setHtml('payFields', h);
+  }
+  function payDetails() {
+    var d = {};
+    ['bank_code', 'branch_number', 'bank_account_number', 'check_number'].forEach(function (k) {
+      var el = document.getElementById('pd_' + k);
+      if (el && el.value !== '') d[k] = isNaN(Number(el.value)) ? el.value : Number(el.value);
+    });
+    var dd = document.getElementById('pd_due_date_disp');
+    if (dd && dd.value) d.due_date = dd.value;
+    return d;
+  }
+  function numPayments() {
+    var el = document.getElementById('pd_np');
+    return el && el.value ? Number(el.value) : 1;
+  }
+
+  async function init() {
+    try {
+      CTX = await R.boot({ entities: ['Invoices', 'Sales_Orders'] });
+      S = R.settings();
+      REC = await R.getRecord(CTX.module, CTX.recordId);
+      R.show('loading', false);
+      if (!REC) throw new Error('הרשומה לא נמצאה');
+      var docNum = f('Rivhit_Document_Number');
+      if (!docNum) {
+        R.show('err', true);
+        R.setHtml('err', R.alertHtml('error', 'טרם הופק מסמך',
+          'לא ניתן לרשום תשלום לפני שהופק מסמך ברווחית.'));
+        return;
+      }
+      curId = Number(f('Rivhit_Currency_ID')) || 1;
+      var total = Number(REC.Grand_Total || REC.Sub_Total || 0);
+      var paid = Number(f('Rivhit_Paid_Amount')) || 0;
+      outstanding = R.round2(total - paid);
+      if (outstanding < 0) outstanding = 0;
+
+      var rows = '';
+      function row(k, v) { rows += '<dt>' + R.esc(k) + '</dt><dd>' + v + '</dd>'; }
+      row('מסמך', R.esc(R.typeName(f('Rivhit_Document_Type'))) + ' ' + R.ltrHtml(docNum));
+      row('סטטוס', R.statusChip(f('Rivhit_Payment_Status')));
+      row('סה״כ', R.ltrHtml(R.money(total, curId)));
+      row('שולם', R.ltrHtml(R.money(paid, curId)));
+      row('יתרה', R.ltrHtml(R.money(outstanding, curId)));
+      R.setHtml('docKv', rows);
+      R.setText('sub', REC.Subject || '');
+
+      document.getElementById('amount').value = outstanding.toFixed(2);
+      R.setText('amountHint', 'יתרה פתוחה: ' + R.money(outstanding, curId));
+      document.getElementById('manualAmount').placeholder = outstanding.toFixed(2);
+      var rts = (S.receiptTypes || []).filter(function (r) { return !r.is_invoice_receipt; });
+      R.fillSelect('receiptType', rts, 'receipt_type', 'receipt_name', (S.roles || {}).role_default_receipt);
+      R.fillSelect('payType', S.paymentTypes || [], 'payment_type', 'payment_name', null);
+      payFieldsFor(R.val('payType'));
+      document.getElementById('sendMail').checked = !!S.sendMailDefault;
+      R.show('main', true);
+      R.gate('recordPayment', 'btnIssue');
+      R.gate('closeDocument', 'btnManual');
+      R.gate('closeDocument', 'btnReopen');
+
+      var map = { tabReceipt: 'panReceipt', tabManual: 'panManual' };
+      Object.keys(map).forEach(function (tid) {
+        R.on(tid, 'click', function () {
+          Object.keys(map).forEach(function (o) {
+            var sel = o === tid;
+            document.getElementById(o).setAttribute('aria-selected', sel ? 'true' : 'false');
+            document.getElementById(map[o]).hidden = !sel;
+          });
+        });
+      });
+      R.on('payType', 'change', function () { payFieldsFor(R.val('payType')); });
+
+      function receiptArgs(extra) {
+        var a = {
+          module: CTX.module, recordId: CTX.recordId,
+          receiptType: Number(R.val('receiptType')),
+          amount: Number(R.val('amount')),
+          paymentType: Number(R.val('payType')),
+          paymentDetails: payDetails(),
+          numberOfPayments: numPayments(),
+          currencyId: curId,
+          exchangeRate: Number(f('Rivhit_Exchange_Rate')) || 0,
+          sendMail: R.checked('sendMail'),
+          comments: R.val('comments'),
+          sourceLabel: 'CRM'
+        };
+        Object.keys(extra || {}).forEach(function (k) { a[k] = extra[k]; });
+        return a;
+      }
+
+      R.on('btnDry', 'click', async function () {
+        R.setHtml('receiptResult', '<span class="spinner"></span> בודק…');
+        try {
+          await R.callFn('rv_issue_receipt', receiptArgs({ dryRunOnly: true }));
+          R.setHtml('receiptResult', R.alertHtml('ok', 'הבדיקה עברה', 'לא נוצרה קבלה ולא נספרה מכסה.'));
+        } catch (e) { R.setHtml('receiptResult', R.alertHtml('error', 'הבדיקה נכשלה', (e && e.message) || '')); }
+      });
+
+      R.on('btnIssue', 'click', async function () {
+        var amt = Number(R.val('amount'));
+        if (!(amt > 0)) { R.setHtml('receiptResult', R.alertHtml('error', 'סכום חייב להיות גדול מאפס', '')); return; }
+        if (!window.confirm('להפיק קבלה על סך ' + R.money(amt, curId) + '?\n\nפעולה חשבונאית בלתי הפיכה.')) return;
+        document.getElementById('btnIssue').disabled = true;
+        R.setHtml('receiptResult', '<span class="spinner"></span> מפיק…');
+        try {
+          var d = await R.callFn('rv_issue_receipt', receiptArgs({}));
+          R.show('main', false); R.show('done', true);
+          var rr = '';
+          rr += '<dt>מספר קבלה</dt><dd>' + R.ltrHtml(d.receiptNumber) + '</dd>';
+          rr += '<dt>סכום</dt><dd>' + R.ltrHtml(R.money(d.amount, curId)) + '</dd>';
+          rr += '<dt>סה״כ שולם</dt><dd>' + R.ltrHtml(R.money(d.paidTotal, curId)) + '</dd>';
+          rr += '<dt>סטטוס</dt><dd>' + R.statusChip(d.status) + '</dd>';
+          R.setHtml('doneKv', rr);
+          if (d.receiptUrl) document.getElementById('doneLink').href = d.receiptUrl;
+          else document.getElementById('doneLink').classList.add('hidden');
+        } catch (e) {
+          document.getElementById('btnIssue').disabled = false;
+          var rec = e && e.data && e.data.recoverable;
+          R.setHtml('receiptResult', R.alertHtml('error', (e && e.message) || 'ההפקה נכשלה',
+            rec ? 'לא ידוע אם הקבלה נוצרה — בדוק ברווחית לפני ניסיון נוסף.' : ''));
+        }
+      });
+
+      R.on('btnManual', 'click', async function () {
+        if (!window.confirm('לסמן את המסמך כמסולק ברווחית ללא הפקת קבלה?')) return;
+        R.setHtml('manualResult', '<span class="spinner"></span> סוגר…');
+        try {
+          var d = await R.callFn('rv_close_document', {
+            module: CTX.module, recordId: CTX.recordId, mode: 'manual',
+            amountClose: Number(R.val('manualAmount')) || 0,
+            closingDate: R.toRivhitDate(R.val('manualDate'))
+          });
+          R.show('main', false); R.show('done', true);
+          R.setText('doneTitle', 'המסמך נסגר');
+          R.setHtml('doneKv', '<dt>מסמך</dt><dd>' + R.ltrHtml(d.documentNumber) + '</dd>');
+          document.getElementById('doneLink').classList.add('hidden');
+        } catch (e) { R.showError('manualResult', e); }
+      });
+
+      R.on('btnReopen', 'click', async function () {
+        if (!window.confirm('לפתוח מחדש את המסמך ברווחית?')) return;
+        R.setHtml('manualResult', '<span class="spinner"></span> פותח…');
+        try {
+          await R.callFn('rv_close_document', { module: CTX.module, recordId: CTX.recordId, mode: 'reopen' });
+          R.show('main', false); R.show('done', true);
+          R.setText('doneTitle', 'המסמך נפתח מחדש');
+          R.setHtml('doneKv', '');
+          document.getElementById('doneLink').classList.add('hidden');
+        } catch (e) { R.showError('manualResult', e); }
+      });
+
+      R.on('btnCancel1', 'click', R.closePopup);
+      R.on('btnCancel2', 'click', R.closePopup);
+      R.on('btnDoneClose', 'click', R.closeReload);
+    } catch (e) {
+      R.show('loading', false); R.show('err', true); R.showError('err', e);
+    }
+  }
+  init();
+})();
+</script>
+</body>
+</html>

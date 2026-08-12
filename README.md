@@ -4,13 +4,23 @@ Design repository for a **Zoho CRM Sigma extension** that integrates Zoho CRM wi
 **Rivhit Online** accounting system (customers, items, tax documents, receipts) and with
 **iCredit**, Rivhit's credit-card payment gateway.
 
-> **Status: design only — revision 2.** No implementation code yet, and nothing here has been
-> run against a live Rivhit account. Revision 2 is verified against the current vendor
-> documentation and OpenAPI specs; revision 1 was based on a 2015 PDF that is substantially
-> out of date.
+> **Status: V1.0-r1 built, never executed.** The extension is feature complete — 9 widgets,
+> 15 Deluge functions, a green test suite and a build gate — but nothing here has run against
+> a live Rivhit account, a Deluge compiler, or a Zoho org. See
+> [`docs/BUILD-STATE.md`](docs/BUILD-STATE.md) for what must be verified before it is trusted
+> with real money.
 
 Publisher: **1T Solutions and Experts**
-Proposed extension namespace: `rivhitzohocrmextension`
+Namespace: `rivhitzohocrmextension`
+
+## Build
+
+```bash
+python3 build.py     # validate → Deluge hygiene → tests → inline → zip
+```
+
+Produces `rivhit-bridge-V1.0-r1.zip`. The Deluge bodies are **not** in the zip — they are
+pasted into Sigma by hand, per [`docs/SIGMA-DEPLOYMENT.md`](docs/SIGMA-DEPLOYMENT.md).
 
 ---
 
@@ -18,6 +28,8 @@ Proposed extension namespace: `rivhitzohocrmextension`
 
 | Doc | What it answers |
 |---|---|
+| [`docs/SIGMA-DEPLOYMENT.md`](docs/SIGMA-DEPLOYMENT.md) | **How to install it** — click-by-click in Sigma, with a smoke test and troubleshooting |
+| [`docs/BUILD-STATE.md`](docs/BUILD-STATE.md) | What exists, what the build gate enforces, and the known gaps |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | **The confirmed parameters** — what the client answered and what each answer changed. Authoritative where it disagrees with anything else. |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | How it's built: components, trust boundary, data model, CRM fields, platform constraints |
 | [`docs/FLOWS.md`](docs/FLOWS.md) | What it does: every user action and background flow, step by step |

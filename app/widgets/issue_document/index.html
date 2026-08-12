@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>הפקת מסמך ברווחית</title>
+<link rel="stylesheet" href="../../rv-styles.css">
+<script src="https://live.zwidgets.com/js-sdk/1.5/ZohoEmbededAppSDK.min.js"></script>
+<script src="../../rv-api.js"></script>
+</head>
+<body>
+
+<div id="loading" class="center" style="padding:40px 0">
+  <span class="spinner lg"></span>
+  <div class="muted">טוען…</div>
+</div>
+
+<div id="err" class="hidden"></div>
+
+<!-- ══════════ כבר הופק ══════════ -->
+<div id="already" class="hidden">
+  <h1>המסמך כבר הופק</h1>
+  <div class="card">
+    <dl class="kv" id="alreadyKv"></dl>
+    <div class="btn-row">
+      <a id="alreadyLink" class="btn btn-primary" target="_blank" rel="noopener">פתיחת המסמך</a>
+      <button class="btn btn-ghost" id="btnClose1">סגירה</button>
+    </div>
+  </div>
+  <div id="driftBox"></div>
+</div>
+
+<!-- ══════════ שחזור ══════════ -->
+<div id="recover" class="hidden">
+  <h1>הפקה לא הושלמה</h1>
+  <div class="alert alert-warn">
+    <strong>קיים מפתח ייחודיות ללא מסמך משויך</strong>
+    <div class="detail">ההפקה הקודמת הופסקה באמצע ולא ידוע אם נוצר מסמך. אין להפיק שוב לפני שחזור — כך נמנעת כפילות של מסמך מס.</div>
+  </div>
+  <div class="btn-row">
+    <button class="btn btn-primary" id="btnRecover">בדיקה מול רווחית</button>
+    <button class="btn btn-ghost" id="btnSkipRecover">התעלם והמשך</button>
+  </div>
+  <div id="recoverResult" style="margin-top:14px"></div>
+</div>
+
+<!-- ══════════ טופס ══════════ -->
+<div id="form" class="hidden">
+  <h1 id="formTitle">הפקת מסמך ברווחית</h1>
+  <p class="sub" id="formSub"></p>
+  <div id="modeWarn"></div>
+
+  <div class="card">
+    <div class="field">
+      <label for="docType">סוג מסמך</label>
+      <select id="docType"></select>
+      <div class="hint" id="docTypeHint"></div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label for="currencyId">מטבע</label>
+        <select id="currencyId"></select>
+      </div>
+      <div class="field" id="rateField" style="display:none">
+        <label for="exchangeRate">שער חליפין</label>
+        <input type="number" id="exchangeRate" step="0.0001" min="0">
+      </div>
+    </div>
+    <div class="field">
+      <label for="dueDate">תאריך פירעון</label>
+      <input type="date" id="dueDate">
+    </div>
+    <div class="field">
+      <label for="comments">הערה על המסמך</label>
+      <textarea id="comments" maxlength="400"></textarea>
+    </div>
+  </div>
+
+  <div class="card" id="payCard" style="display:none">
+    <div class="card-title">תשלום <span class="chip chip-warn">נדרש לסוג מסמך זה</span></div>
+    <div class="field">
+      <label for="payType">אמצעי תשלום</label>
+      <select id="payType"></select>
+    </div>
+    <div id="payFields"></div>
+  </div>
+
+  <div class="card" id="closeCard" style="display:none">
+    <div class="check">
+      <input type="checkbox" id="closeSource" checked>
+      <label for="closeSource">סגירת מסמך ההזמנה שהופק מהזמנת הרכש
+        <span class="hint" id="closeSourceHint"></span></label>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">מלאי ומע״מ</div>
+    <div class="check">
+      <input type="checkbox" id="updateStock" checked>
+      <label for="updateStock">עדכון מלאי בעת ההפקה</label>
+    </div>
+    <div class="check">
+      <input type="checkbox" id="rejectShort">
+      <label for="rejectShort">חסימה אם פריט חסר במלאי</label>
+    </div>
+    <div class="check">
+      <input type="checkbox" id="vatExempt">
+      <label for="vatExempt">מסמך פטור ממע״מ</label>
+    </div>
+    <div class="check">
+      <input type="checkbox" id="sendMail">
+      <label for="sendMail">שליחת המסמך ללקוח במייל</label>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">שורות</div>
+    <div id="linesBox"></div>
+  </div>
+
+  <div id="quotaWarn"></div>
+  <div id="issueResult"></div>
+
+  <div class="btn-row">
+    <button class="btn" id="btnDryRun">בדיקה בלבד (ללא חיוב)</button>
+    <button class="btn btn-primary" id="btnIssue">הפקת מסמך</button>
+    <button class="btn btn-ghost" id="btnCancel">ביטול</button>
+  </div>
+  <p class="small muted" style="margin-top:10px">
+    הפקת מסמך היא פעולה חשבונאית בלתי הפיכה ונספרת במכסה החודשית.
+    בדיקה מקדימה חינמית ואינה יוצרת דבר.
+  </p>
+</div>
+
+<!-- ══════════ הצלחה ══════════ -->
+<div id="done" class="hidden center">
+  <div style="font-size:42px">✅</div>
+  <h1 id="doneTitle">המסמך הופק</h1>
+  <div class="card" style="text-align:start">
+    <dl class="kv" id="doneKv"></dl>
+  </div>
+  <div id="doneWarn"></div>
+  <div class="btn-row" style="justify-content:center">
+    <a id="doneLink" class="btn btn-primary" target="_blank" rel="noopener">פתיחת המסמך</a>
+    <button class="btn btn-ghost" id="btnDoneClose">סגירה</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  var R = RivhitAPI;
+  var CTX = null, REC = null, S = {}, SRC = null;
+
+  function f(logical) { return R.getField(CTX.module, REC, logical); }
+
+  function moneyOf(v) { return R.money(v, R.val('currencyId') || 1); }
+
+  function renderLines() {
+    var lines = (REC && REC.Product_Details) || [];
+    if (!lines.length) {
+      R.setHtml('linesBox', R.alertHtml('error', 'אין שורות פריטים', 'לא ניתן להפיק מסמך ללא שורות.'));
+      document.getElementById('btnIssue').disabled = true;
+      document.getElementById('btnDryRun').disabled = true;
+      return 0;
+    }
+    var total = 0, h = '<div class="t-wrap"><table><thead><tr>' +
+      '<th>תיאור</th><th class="n">כמות</th><th class="n">מחיר</th><th class="n">סה״כ</th></tr></thead><tbody>';
+    lines.forEach(function (ln) {
+      var prod = ln.product || {};
+      var qty = Number(ln.quantity) || 1;
+      var lp = Number(ln.list_price) || 0;
+      var disc = Number(ln.Discount) || 0;
+      var lt = R.round2(lp * qty - disc);
+      total += lt;
+      var desc = ln.product_description || prod.name || 'פריט';
+      h += '<tr><td>' + R.esc(desc) + '</td>' +
+           '<td class="n">' + R.ltrHtml(qty) + '</td>' +
+           '<td class="n">' + R.ltrHtml(moneyOf(lp)) + '</td>' +
+           '<td class="n">' + R.ltrHtml(moneyOf(lt)) + '</td></tr>';
+    });
+    total = R.round2(total);
+    h += '</tbody><tfoot><tr><td colspan="3" class="n"><strong>סה״כ</strong></td>' +
+         '<td class="n"><strong>' + R.ltrHtml(moneyOf(total)) + '</strong></td></tr></tfoot></table></div>';
+    R.setHtml('linesBox', h);
+    return total;
+  }
+
+  function payFieldsFor(code) {
+    var t = (S.paymentTypes || []).filter(function (p) { return String(p.payment_type) === String(code); })[0];
+    var name = (t && t.payment_name) || '';
+    var n = Number(code);
+    var h = '';
+    function inp(id, label, type) {
+      return '<div class="field"><label for="' + id + '">' + R.esc(label) + '</label>' +
+             '<input type="' + (type || 'text') + '" id="' + id + '" class="mono-in"></div>';
+    }
+    // Rivhit requires different fields per method. Defaults: 1 check, 2 cash,
+    // 4-8 credit cards, 9 bank transfer — but codes are per-business, so match
+    // on the NAME as well before falling back to the numeric default.
+    var isCheck    = n === 1 || /שיק|צ'ק|check/i.test(name);
+    var isCard     = (n >= 4 && n <= 8) || /אשראי|ויזה|ישראכרט|card/i.test(name);
+    var isTransfer = n === 9 || /העברה|transfer/i.test(name);
+    if (isCheck) {
+      h += '<div class="row">' + inp('pd_bank_code', 'קוד בנק', 'number') +
+           inp('pd_branch_number', 'סניף', 'number') + '</div>' +
+           '<div class="row">' + inp('pd_bank_account_number', 'מספר חשבון') +
+           inp('pd_check_number', 'מספר שיק', 'number') + '</div>' +
+           inp('pd_due_date_disp', 'תאריך פירעון (dd/mm/yyyy)');
+    } else if (isCard) {
+      h += '<div class="row">' + inp('pd_bank_account_number', '4 ספרות אחרונות', 'number') +
+           inp('pd_check_number', 'מספר שובר', 'number') + '</div>' +
+           inp('pd_number_of_payments', 'מספר תשלומים', 'number');
+    } else if (isTransfer) {
+      h += '<div class="row">' + inp('pd_bank_code', 'קוד בנק', 'number') +
+           inp('pd_branch_number', 'סניף', 'number') + '</div>' +
+           '<div class="row">' + inp('pd_bank_account_number', 'מספר חשבון') +
+           inp('pd_check_number', 'אסמכתא', 'number') + '</div>';
+    }
+    R.setHtml('payFields', h);
+  }
+
+  function collectPayDetails() {
+    var d = {};
+    ['bank_code', 'branch_number', 'bank_account_number', 'check_number', 'number_of_payments'].forEach(function (k) {
+      var el = document.getElementById('pd_' + k);
+      if (el && el.value !== '') d[k] = isNaN(Number(el.value)) ? el.value : Number(el.value);
+    });
+    var dd = document.getElementById('pd_due_date_disp');
+    if (dd && dd.value) d.due_date = dd.value;
+    return d;
+  }
+
+  function onTypeChange() {
+    var code = R.val('docType');
+    var d = R.docType(code);
+    var needsPay = !!(d && d.is_invoice_receipt);
+    document.getElementById('payCard').style.display = needsPay ? '' : 'none';
+    var bits = [];
+    if (d) {
+      if (d.is_invoice_receipt) bits.push('חשבונית מס קבלה — חובה לציין תשלום');
+      if (d.is_accounting) bits.push('מסמך חשבונאי'); else bits.push('מסמך שאינו חשבונאי');
+      if (S.confirmationRequired && d.is_accounting) bits.push('צפוי מספר הקצאה');
+    }
+    R.setText('docTypeHint', bits.join(' · '));
+  }
+
+  function onCurrencyChange() {
+    var c = Number(R.val('currencyId')) || 1;
+    document.getElementById('rateField').style.display = (c === 1) ? 'none' : '';
+    renderLines();
+  }
+
+  function args(extra) {
+    var a = {
+      module: CTX.module,
+      recordId: CTX.recordId,
+      documentType: Number(R.val('docType')),
+      currencyId: Number(R.val('currencyId')) || 1,
+      exchangeRate: Number(R.val('exchangeRate')) || 0,
+      updateStock: R.checked('updateStock'),
+      rejectOutOfStock: R.checked('rejectShort'),
+      vatExempt: R.checked('vatExempt'),
+      sendMail: R.checked('sendMail'),
+      comments: R.val('comments'),
+      dueDate: R.toRivhitDate(R.val('dueDate'))
+    };
+    if (R.typeNeedsPayments(a.documentType)) {
+      a.paymentType = Number(R.val('payType'));
+      a.paymentDetails = collectPayDetails();
+    }
+    if (SRC && R.checked('closeSource')) {
+      a.closeSourceType = SRC.type;
+      a.closeSourceNumber = SRC.number;
+    }
+    Object.keys(extra || {}).forEach(function (k) { a[k] = extra[k]; });
+    return a;
+  }
+
+  function showDone(d) {
+    R.show('form', false);
+    R.show('done', true);
+    var rows = '';
+    function row(k, v) { rows += '<dt>' + R.esc(k) + '</dt><dd>' + v + '</dd>'; }
+    row('סוג מסמך', R.esc(d.typeName || '') + ' ' + R.ltrHtml(d.documentType));
+    row('מספר מסמך', R.ltrHtml(d.documentNumber));
+    row('סכום', R.ltrHtml(R.money(d.amount, R.val('currencyId'))));
+    if (d.confirmationNumber) row('מספר הקצאה', R.ltrHtml(d.confirmationNumber));
+    R.setHtml('doneKv', rows);
+    if (d.documentUrl) {
+      var a = document.getElementById('doneLink');
+      a.href = d.documentUrl;
+    } else {
+      document.getElementById('doneLink').classList.add('hidden');
+    }
+    if (d.confirmationStatus === 'Missing') {
+      R.setHtml('doneWarn', R.alertHtml('warn', 'המסמך הופק ללא מספר הקצאה',
+        'ניתן לבקש מספר הקצאה בדיעבד מכרטיס הרשומה. ללא מספר הקצאה הלקוח עלול שלא לקזז מע״מ תשומות.'));
+    }
+  }
+
+  async function init() {
+    try {
+      CTX = await R.boot({ entities: ['Invoices', 'Sales_Orders'] });
+      S = R.settings();
+      if (!R.isConfigured()) {
+        R.show('loading', false);
+        R.setHtml('err', R.alertHtml('error', R.t('notConfigured'), ''));
+        R.show('err', true);
+        return;
+      }
+      REC = await R.getRecord(CTX.module, CTX.recordId);
+      if (!REC) throw new Error('הרשומה לא נמצאה');
+      R.show('loading', false);
+
+      var docNum = f('Rivhit_Document_Number');
+      var reqRef = f('Rivhit_Request_Reference');
+
+      // Already issued → read-only card.
+      if (docNum) {
+        var rows = '';
+        function row(k, v) { rows += '<dt>' + R.esc(k) + '</dt><dd>' + v + '</dd>'; }
+        row('סוג מסמך', R.esc(R.typeName(f('Rivhit_Document_Type'))));
+        row('מספר מסמך', R.ltrHtml(docNum));
+        row('סטטוס', R.statusChip(f('Rivhit_Payment_Status')));
+        row('מספר הקצאה', f('Rivhit_Confirmation_Number')
+              ? R.ltrHtml(f('Rivhit_Confirmation_Number'))
+              : R.confirmationChip(f('Rivhit_Confirmation_Status')));
+        row('שולם', R.ltrHtml(R.money(f('Rivhit_Paid_Amount'), f('Rivhit_Currency_ID'))));
+        var prog = f('Rivhit_Instalment_Progress');
+        if (prog) row('תשלומים', R.ltrHtml(prog));
+        R.setHtml('alreadyKv', rows);
+        var url = f('Rivhit_Document_URL');
+        if (url) document.getElementById('alreadyLink').href = url;
+        else document.getElementById('alreadyLink').classList.add('hidden');
+        if (f('Rivhit_Record_Drift')) {
+          R.setHtml('driftBox', R.alertHtml('warn', R.t('driftWarn'),
+            'ראה את ההערות ברשומה לפירוט מה השתנה. לתיקון יש לבטל את המסמך ולהפיק מחדש.'));
+        }
+        R.show('already', true);
+        R.on('btnClose1', 'click', R.closePopup);
+        return;
+      }
+
+      // Reference without a document → recovery, before anything else.
+      if (reqRef) {
+        R.show('recover', true);
+        R.on('btnRecover', 'click', async function () {
+          R.setHtml('recoverResult', '<span class="spinner"></span> בודק מול רווחית…');
+          try {
+            var d = await R.callFn('rv_recover_request', { module: CTX.module, recordId: CTX.recordId });
+            if (d.recovered) {
+              R.setHtml('recoverResult', R.alertHtml('ok',
+                'המסמך אותר — מספר ' + d.documentNumber, 'לא הופק מסמך כפול. סגור וטען מחדש.'));
+            } else if (d.safeToReissue) {
+              R.setHtml('recoverResult', R.alertHtml('info', 'לא נוצר מסמך',
+                'ניתן להפיק כעת בבטחה.'));
+              R.show('recover', false);
+              R.show('form', true);
+            } else {
+              R.setHtml('recoverResult', R.alertHtml('warn', 'לא ניתן לקבוע',
+                'בדוק ברווחית ידנית לפני הפקה חוזרת.'));
+            }
+          } catch (e) { R.showError('recoverResult', e); }
+        });
+        R.on('btnSkipRecover', 'click', function () {
+          R.show('recover', false);
+          R.show('form', true);
+        });
+        return;
+      }
+
+      R.show('form', true);
+
+      // Permission is enforced server-side; this only avoids offering a
+      // button that will be refused.
+      R.gate('issueDocument', 'btnIssue');
+
+      // A payment link outstanding + iCredit issuing = two tax documents.
+      if (S.icreditIssuesDocument && f('ICredit_Payment_URL')) {
+        R.setHtml('modeWarn', R.alertHtml('error', 'קיים קישור תשלום פעיל',
+          'iCredit מוגדרת להפיק את מסמך המס בעצמה. הפקה כאן תיצור מסמך שני לאותה עסקה.'));
+        document.getElementById('btnIssue').disabled = true;
+      } else if (S.accountMode === 'production') {
+        R.setHtml('modeWarn', R.alertHtml('warn', 'חשבון ייצור',
+          'המסמך שיופק הוא מסמך משפטי אמיתי.'));
+      }
+
+      R.setText('formSub', (CTX.module === 'Sales_Orders' ? 'הזמנת רכש' : 'חשבונית') +
+                ' · ' + (REC.Subject || ''));
+
+      var types = R.docTypes();
+      var roles = S.roles || {};
+      var def = CTX.module === 'Sales_Orders' ? roles.role_default_sales_order : roles.role_default_invoice;
+      R.fillSelect('docType', types, 'document_type', 'document_name', def);
+      var curs = (S.currencies || []).map(function (c) {
+        return { id: c.currency_id, name: c.currency_name + ' (' + c.iso_code + ')' };
+      });
+      if (!curs.length) curs = [{ id: 1, name: 'ש״ח (ILS)' }];
+      var recCur = f('Rivhit_Currency_ID') || R.isoToCurrencyId(REC.Currency) || S.defaultCurrencyId || 1;
+      R.fillSelect('currencyId', curs, 'id', 'name', recCur);
+      var pts = S.paymentTypes || [];
+      R.fillSelect('payType', pts, 'payment_type', 'payment_name', null);
+      document.getElementById('updateStock').checked = S.defaultUpdateInventory !== false;
+      document.getElementById('sendMail').checked = !!S.sendMailDefault;
+      if (REC.Due_Date) document.getElementById('dueDate').value = String(REC.Due_Date).substring(0, 10);
+      if (REC.Exchange_Rate) document.getElementById('exchangeRate').value = REC.Exchange_Rate;
+
+      // Sales Order → Invoice chain: offer to close the order document.
+      if (CTX.module === 'Invoices' && REC.Sales_Order && REC.Sales_Order.id) {
+        try {
+          var so = await R.getRecord('Sales_Orders', REC.Sales_Order.id);
+          var soNum = R.getField('Sales_Orders', so, 'Rivhit_Document_Number');
+          var soType = R.getField('Sales_Orders', so, 'Rivhit_Document_Type');
+          if (soNum) {
+            SRC = { type: Number(soType), number: Number(soNum) };
+            document.getElementById('closeCard').style.display = '';
+            R.setText('closeSourceHint', 'מסמך ' + soType + '/' + soNum + ' יסומן כסגור ברווחית');
+          }
+        } catch (e) { R.dbg('sales order lookup failed', e); }
+      }
+
+      var q = parseInt(S.monthlyQuota || '0', 10);
+      var used = parseInt((S.usage || {}).count || 0, 10);
+      if (q > 0 && used >= q * 0.8) {
+        R.setHtml('quotaWarn', R.alertHtml('warn', 'מתקרב למכסה החודשית',
+          'הופקו ' + used + ' מתוך ' + q + ' מסמכים החודש.'));
+      }
+
+      onTypeChange();
+      onCurrencyChange();
+      R.on('docType', 'change', onTypeChange);
+      R.on('currencyId', 'change', onCurrencyChange);
+      R.on('payType', 'change', function () { payFieldsFor(R.val('payType')); });
+      payFieldsFor(R.val('payType'));
+
+      R.on('btnDryRun', 'click', async function () {
+        R.setHtml('issueResult', '<span class="spinner"></span> בודק מול רווחית…');
+        try {
+          var d = await R.callFn('rv_issue_document', args({ dryRunOnly: true }));
+          R.setHtml('issueResult', R.alertHtml('ok', R.t('dryRunOk'),
+            'סכום: ' + R.money(d.itemsTotal, R.val('currencyId')) + ' · לא נוצר מסמך ולא נספרה מכסה.'));
+        } catch (e) {
+          R.setHtml('issueResult', R.alertHtml('error', R.t('dryRunFail'), (e && e.message) || ''));
+        }
+      });
+
+      R.on('btnIssue', 'click', async function () {
+        var typeName = R.typeName(R.val('docType'));
+        if (!window.confirm('להפיק "' + typeName + '" ברווחית?\n\nזוהי פעולה חשבונאית בלתי הפיכה.')) return;
+        document.getElementById('btnIssue').disabled = true;
+        R.setHtml('issueResult', '<span class="spinner"></span> מפיק…');
+        try {
+          var d = await R.callFn('rv_issue_document', args({}));
+          showDone(d);
+        } catch (e) {
+          document.getElementById('btnIssue').disabled = false;
+          var recoverable = e && e.data && e.data.recoverable;
+          R.setHtml('issueResult', R.alertHtml('error',
+            (e && e.message) || 'ההפקה נכשלה',
+            recoverable ? 'לא ידוע אם נוצר מסמך. סגור, פתח מחדש והרץ שחזור — אל תפיק שוב.' : ''));
+        }
+      });
+
+      R.on('btnCancel', 'click', R.closePopup);
+      R.on('btnDoneClose', 'click', R.closeReload);
+    } catch (e) {
+      R.show('loading', false);
+      R.show('err', true);
+      R.showError('err', e);
+    }
+  }
+  init();
+})();
+</script>
+</body>
+</html>

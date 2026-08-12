@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>ביטול מסמך ברווחית</title>
+<link rel="stylesheet" href="../../rv-styles.css">
+<script src="https://live.zwidgets.com/js-sdk/1.5/ZohoEmbededAppSDK.min.js"></script>
+<script src="../../rv-api.js"></script>
+</head>
+<body>
+
+<div id="loading" class="center" style="padding:40px 0"><span class="spinner lg"></span><div class="muted">טוען…</div></div>
+<div id="err" class="hidden"></div>
+
+<div id="main" class="hidden">
+  <h1>ביטול מסמך ברווחית</h1>
+  <div class="card tight"><dl class="kv" id="kv"></dl></div>
+
+  <div class="alert alert-error">
+    <strong>מסמך מס אינו נמחק — הוא מבוטל באמצעות מסמך מזכה</strong>
+    <div class="detail">רווחית תפיק מסמך זיכוי בעצמה. הפעולה נספרת במכסה החודשית ואינה הפיכה.</div>
+  </div>
+
+  <div id="pairWarn"></div>
+
+  <div class="card">
+    <div class="field">
+      <label for="reason">סיבת הביטול</label>
+      <textarea id="reason" maxlength="400" placeholder="תופיע כהערה על מסמך הזיכוי"></textarea>
+    </div>
+    <div class="check">
+      <input type="checkbox" id="sendMail">
+      <label for="sendMail">שליחת מסמך הזיכוי ללקוח במייל</label>
+    </div>
+    <div class="field">
+      <label for="confirmText">להמשך, הקלד <code>ביטול</code></label>
+      <input type="text" id="confirmText" autocomplete="off">
+    </div>
+  </div>
+
+  <div id="result"></div>
+  <div class="btn-row">
+    <button class="btn btn-danger" id="btnCancelDoc" disabled>ביטול המסמך</button>
+    <button class="btn btn-ghost" id="btnClose">חזרה</button>
+  </div>
+</div>
+
+<div id="done" class="hidden center">
+  <div style="font-size:42px" id="doneIcon">✅</div>
+  <h1 id="doneTitle">המסמך בוטל</h1>
+  <div class="card" style="text-align:start"><dl class="kv" id="doneKv"></dl></div>
+  <div id="doneWarn"></div>
+  <div class="btn-row" style="justify-content:center">
+    <a id="creditLink" class="btn btn-primary" target="_blank" rel="noopener">פתיחת מסמך הזיכוי</a>
+    <button class="btn btn-ghost" id="btnDoneClose">סגירה</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  var R = RivhitAPI;
+  var CTX, REC;
+  function f(k) { return R.getField(CTX.module, REC, k); }
+
+  async function init() {
+    try {
+      CTX = await R.boot({ entities: ['Invoices', 'Sales_Orders'] });
+      REC = await R.getRecord(CTX.module, CTX.recordId);
+      R.show('loading', false);
+      if (!REC) throw new Error('הרשומה לא נמצאה');
+      var docNum = f('Rivhit_Document_Number');
+      var docType = f('Rivhit_Document_Type');
+      if (!docNum) {
+        R.show('err', true);
+        R.setHtml('err', R.alertHtml('error', 'אין מסמך לביטול', 'טרם הופק מסמך ברווחית.'));
+        return;
+      }
+      if (f('Rivhit_Payment_Status') === 'Cancelled') {
+        R.show('err', true);
+        R.setHtml('err', R.alertHtml('info', 'המסמך כבר בוטל',
+          'מסמך מזכה: ' + (f('Rivhit_Cancel_Document_Number') || '—')));
+        return;
+      }
+      var curId = Number(f('Rivhit_Currency_ID')) || 1;
+      var h = '';
+      function row(k, v) { h += '<dt>' + R.esc(k) + '</dt><dd>' + v + '</dd>'; }
+      row('מסמך', R.esc(R.typeName(docType)) + ' ' + R.ltrHtml(docNum));
+      row('סכום', R.ltrHtml(R.money(REC.Grand_Total || REC.Sub_Total || 0, curId)));
+      row('סטטוס', R.statusChip(f('Rivhit_Payment_Status')));
+      R.setHtml('kv', h);
+
+      // An invoice-receipt has two halves and both must be reversed.
+      var dt = R.docType(docType);
+      if (dt && dt.is_invoice_receipt) {
+        R.setHtml('pairWarn', R.alertHtml('warn', 'מסמך זה כולל חלק קבלה',
+          'יבוטלו שני החלקים — גם המסמך וגם הקבלה. ביטול חלק אחד בלבד משאיר את הספרים בביטול חלקי, ולכן שתי הפעולות מבוצעות יחד.'));
+      }
+
+      R.show('main', true);
+      R.gate('cancelDocument', 'btnCancelDoc');
+
+      R.on('confirmText', 'input', function () {
+        var ok = R.val('confirmText').trim() === 'ביטול' && R.can('cancelDocument');
+        document.getElementById('btnCancelDoc').disabled = !ok;
+      });
+
+      R.on('btnCancelDoc', 'click', async function () {
+        document.getElementById('btnCancelDoc').disabled = true;
+        R.setHtml('result', '<span class="spinner"></span> מבטל…');
+        try {
+          var d = await R.callFn('rv_cancel_document', {
+            module: CTX.module, recordId: CTX.recordId,
+            reason: R.val('reason'), sendMail: R.checked('sendMail')
+          });
+          R.show('main', false); R.show('done', true);
+          var dh = '';
+          dh += '<dt>מסמך מקורי</dt><dd>' + R.ltrHtml(docType + '/' + docNum) + '</dd>';
+          dh += '<dt>מסמך מזכה</dt><dd>' + R.ltrHtml(d.cancelDocumentType + '/' + d.cancelDocumentNumber) + '</dd>';
+          if (d.wasInvoiceReceipt) {
+            dh += '<dt>חלק הקבלה</dt><dd>' +
+                  (d.receiptCancelled ? '<span class="chip chip-ok">בוטל</span>'
+                                      : '<span class="chip chip-err">לא בוטל</span>') + '</dd>';
+          }
+          R.setHtml('doneKv', dh);
+          if (d.cancelDocumentUrl) document.getElementById('creditLink').href = d.cancelDocumentUrl;
+          else document.getElementById('creditLink').classList.add('hidden');
+          if (d.wasInvoiceReceipt && !d.receiptCancelled) {
+            R.setText('doneIcon', '⚠');
+            R.setText('doneTitle', 'ביטול חלקי');
+            R.setHtml('doneWarn', R.alertHtml('error', 'חלק הקבלה לא בוטל',
+              (d.receiptError || '') + ' — יש לבטל את הקבלה ידנית ברווחית. עד אז הספרים במצב ביטול חלקי.'));
+          }
+        } catch (e) {
+          document.getElementById('btnCancelDoc').disabled = false;
+          R.showError('result', e);
+        }
+      });
+      R.on('btnClose', 'click', R.closePopup);
+      R.on('btnDoneClose', 'click', R.closeReload);
+    } catch (e) {
+      R.show('loading', false); R.show('err', true); R.showError('err', e);
+    }
+  }
+  init();
+})();
+</script>
+</body>
+</html>

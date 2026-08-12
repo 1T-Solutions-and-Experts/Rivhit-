@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>סנכרון לקוחות לרווחית</title>
+<link rel="stylesheet" href="../../rv-styles.css">
+<script src="https://live.zwidgets.com/js-sdk/1.5/ZohoEmbededAppSDK.min.js"></script>
+<script src="../../rv-api.js"></script>
+</head>
+<body>
+
+<div id="loading" class="center" style="padding:40px 0"><span class="spinner lg"></span><div class="muted">טוען…</div></div>
+<div id="err" class="hidden"></div>
+
+<div id="main" class="hidden">
+  <h1>סנכרון לקוחות לרווחית</h1>
+  <p class="sub" id="sub"></p>
+
+  <div class="alert alert-info small">
+    לכל רשומה מתבצע איתור לפי הסדר: מזהה שמור ← מזהה חיצוני (acc_ref) ← דוא״ל ← יצירה.
+    התאמה לפי מזהה חיצוני מאומתת מול השם או מספר העוסק לפני שהיא מתקבלת, כדי שלא ייווצרו כפילויות.
+  </div>
+
+  <div class="card tight">
+    <div class="bar"><i id="bar" style="width:0%"></i></div>
+    <div class="bar-label" id="progress">מוכן</div>
+  </div>
+
+  <div id="summary"></div>
+  <div id="resultTable"></div>
+
+  <div class="btn-row">
+    <button class="btn btn-primary" id="btnStart">התחלת סנכרון</button>
+    <button class="btn" id="btnContinue" style="display:none">המשך</button>
+    <button class="btn btn-ghost" id="btnClose">סגירה</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  var R = RivhitAPI;
+  var CTX, ALL = [], queue = [], totals = { created: 0, updated: 0, failed: 0 }, rows = [];
+
+  function paint() {
+    var doneN = ALL.length - queue.length;
+    var pct = ALL.length ? Math.round(doneN / ALL.length * 100) : 0;
+    document.getElementById('bar').style.width = pct + '%';
+    R.setText('progress', doneN + ' מתוך ' + ALL.length + ' (' + pct + '%)');
+    R.setHtml('summary',
+      '<div class="card tight"><span class="chip chip-ok">נוצרו ' + totals.created + '</span> ' +
+      '<span class="chip chip-accent">עודכנו ' + totals.updated + '</span> ' +
+      '<span class="chip ' + (totals.failed ? 'chip-err' : 'chip-neutral') + '">נכשלו ' + totals.failed + '</span></div>');
+    if (rows.length) {
+      var h = '<div class="t-wrap"><table><thead><tr><th>שם</th><th>תוצאה</th><th>מזהה רווחית</th><th>הערה</th></tr></thead><tbody>';
+      rows.slice(-60).forEach(function (r) {
+        var chip = r.status === 'created' ? '<span class="chip chip-ok">נוצר</span>'
+                 : r.status === 'updated' ? '<span class="chip chip-accent">עודכן</span>'
+                 : '<span class="chip chip-err">נכשל</span>';
+        var note = r.error || (r.accRefCollision ? 'התאמת acc_ref נדחתה — נוצר חדש' : (r.via || ''));
+        h += '<tr><td>' + R.esc(r.name || r.id) + '</td><td>' + chip + '</td>' +
+             '<td>' + (r.customerId ? R.ltrHtml(r.customerId) : '—') + '</td>' +
+             '<td class="small muted">' + R.esc(note) + '</td></tr>';
+      });
+      R.setHtml('resultTable', h + '</tbody></table></div>');
+    }
+  }
+
+  async function runBatch() {
+    document.getElementById('btnStart').disabled = true;
+    document.getElementById('btnContinue').disabled = true;
+    R.setText('progress', 'מסנכרן…');
+    try {
+      var d = await R.callFn('rv_upsert_customer', { module: CTX.module, ids: queue });
+      totals.created += d.created || 0;
+      totals.updated += d.updated || 0;
+      totals.failed  += d.failed  || 0;
+      rows = rows.concat(d.results || []);
+      queue = d.remaining || [];
+      paint();
+      if (queue.length) {
+        // Zoho caps integration calls per function execution, so the batch is
+        // bounded and the widget drives the cursor rather than pretending one
+        // click covered everything.
+        document.getElementById('btnContinue').style.display = '';
+        document.getElementById('btnContinue').disabled = false;
+        R.setText('progress', (ALL.length - queue.length) + ' מתוך ' + ALL.length +
+                  ' — נותרו ' + queue.length + '. לחץ "המשך".');
+      } else {
+        document.getElementById('btnContinue').style.display = 'none';
+        R.setText('progress', 'הסתיים — ' + ALL.length + ' רשומות');
+      }
+    } catch (e) {
+      R.showError('summary', e);
+      document.getElementById('btnStart').disabled = false;
+    }
+  }
+
+  async function init() {
+    try {
+      CTX = await R.boot({ entities: ['Accounts', 'Contacts'] });
+      ALL = (CTX.ids || []).slice();
+      queue = ALL.slice();
+      R.show('loading', false);
+      if (!R.isConfigured()) {
+        R.show('err', true);
+        R.setHtml('err', R.alertHtml('error', R.t('notConfigured'), ''));
+        return;
+      }
+      if (!ALL.length) {
+        R.show('err', true);
+        R.setHtml('err', R.alertHtml('warn', 'לא נבחרו רשומות', 'בחר רשומות ברשימה והפעל שוב.'));
+        return;
+      }
+      R.setText('sub', (CTX.module === 'Contacts' ? 'אנשי קשר' : 'לקוחות') + ' · ' + ALL.length + ' רשומות נבחרו');
+      R.show('main', true);
+      R.gate('syncCustomers', 'btnStart');
+      paint();
+      R.on('btnStart', 'click', runBatch);
+      R.on('btnContinue', 'click', runBatch);
+      R.on('btnClose', 'click', R.closeReload);
+    } catch (e) {
+      R.show('loading', false); R.show('err', true); R.showError('err', e);
+    }
+  }
+  init();
+})();
+</script>
+</body>
+</html>

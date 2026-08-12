@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>דוח גיול חובות</title>
+<link rel="stylesheet" href="../../rv-styles.css">
+<script src="https://live.zwidgets.com/js-sdk/1.5/ZohoEmbededAppSDK.min.js"></script>
+<script src="../../rv-api.js"></script>
+</head>
+<body>
+
+<div id="loading" class="center" style="padding:40px 0"><span class="spinner lg"></span><div class="muted" id="loadMsg">טוען מרווחית…</div></div>
+<div id="err" class="hidden"></div>
+
+<div id="main" class="hidden">
+  <h1>דוח גיול חובות</h1>
+  <p class="sub">נמשך ישירות מרווחית (Customer.OpenDocuments) — לא שוחזר מנתוני CRM.</p>
+
+  <div class="card tight">
+    <div class="row">
+      <div class="field">
+        <label for="fromDate">מתאריך</label>
+        <input type="date" id="fromDate">
+      </div>
+      <div class="field">
+        <label for="toDate">עד תאריך</label>
+        <input type="date" id="toDate">
+      </div>
+      <div class="field" style="flex:0 0 auto;align-self:flex-end">
+        <button class="btn btn-primary" id="btnLoad">רענון</button>
+      </div>
+    </div>
+    <div class="hint" id="windowNote"></div>
+  </div>
+
+  <div id="totals"></div>
+
+  <div class="tabs" role="tablist">
+    <button class="tab" id="tabOpen" role="tab" aria-selected="true">מסמכים פתוחים</button>
+    <button class="tab" id="tabExc"  role="tab" aria-selected="false">חריגים <span id="excCount" class="chip chip-neutral">0</span></button>
+  </div>
+
+  <section class="tabpanel" id="panOpen" role="tabpanel">
+    <div id="openTable"></div>
+  </section>
+
+  <section class="tabpanel" id="panExc" role="tabpanel" hidden>
+    <p class="small muted">מצבים שדורשים התערבות אנושית. רשימה ריקה היא תוצאה טובה, לא תקלה.</p>
+    <div id="excTable"></div>
+  </section>
+
+  <div class="btn-row"><button class="btn btn-ghost" id="btnClose">סגירה</button></div>
+</div>
+
+<script>
+(function () {
+  var R = RivhitAPI;
+  var ROWS = [], EXC = [];
+
+  function ageBucket(issueIso) {
+    if (!issueIso) return '—';
+    var d = new Date(issueIso + 'T00:00:00');
+    if (isNaN(d.getTime())) return '—';
+    var days = Math.floor((Date.now() - d.getTime()) / 86400000);
+    if (days <= 30) return '0–30';
+    if (days <= 60) return '31–60';
+    if (days <= 90) return '61–90';
+    return '90+';
+  }
+  function bucketChip(b) {
+    var cls = b === '90+' ? 'chip-err' : b === '61–90' ? 'chip-warn' : 'chip-neutral';
+    return '<span class="chip ' + cls + '">' + R.esc(b) + '</span>';
+  }
+
+  function renderOpen() {
+    if (!ROWS.length) {
+      R.setHtml('openTable', R.alertHtml('ok', 'אין מסמכים פתוחים בטווח שנבחר', ''));
+      R.setHtml('totals', '');
+      return;
+    }
+    var sumTotal = 0, sumPaid = 0, sumBal = 0;
+    var h = '<div class="t-wrap"><table><thead><tr>' +
+            '<th>לקוח</th><th>מסמך</th><th>הופק</th><th>פירעון</th>' +
+            '<th class="n">סה״כ</th><th class="n">שולם</th><th class="n">יתרה</th><th>גיל</th>' +
+            '</tr></thead><tbody>';
+    ROWS.forEach(function (r) {
+      var total = Number(r.total_amount) || 0;
+      var paid = Number(r.paid_amount) || 0;
+      var bal = R.round2(total - paid);
+      sumTotal += total; sumPaid += paid; sumBal += bal;
+      var iso = R.fromRivhitDate(r.issue_date);
+      var b = ageBucket(iso);
+      var cur = Number(r.currency_id) || 1;
+      h += '<tr><td>' + R.esc(r.customer_name || r.customer_id) + '</td>' +
+           '<td>' + R.ltrHtml(r.document_type + '/' + r.document_number) + '</td>' +
+           '<td>' + R.displayDate(r.issue_date) + '</td>' +
+           '<td>' + R.displayDate(r.due_date) + '</td>' +
+           '<td class="n">' + R.ltrHtml(R.money(total, cur)) + '</td>' +
+           '<td class="n">' + R.ltrHtml(R.money(paid, cur)) + '</td>' +
+           '<td class="n"><strong>' + R.ltrHtml(R.money(bal, cur)) + '</strong></td>' +
+           '<td>' + bucketChip(b) + '</td></tr>';
+    });
+    h += '</tbody></table></div>';
+    R.setHtml('openTable', h);
+    R.setHtml('totals',
+      '<div class="card tight"><span class="chip chip-neutral">' + ROWS.length + ' מסמכים</span> ' +
+      '<span class="chip chip-accent">סה״כ ' + R.money(sumTotal, 1) + '</span> ' +
+      '<span class="chip chip-ok">שולם ' + R.money(sumPaid, 1) + '</span> ' +
+      '<span class="chip chip-warn">יתרה ' + R.money(sumBal, 1) + '</span></div>');
+  }
+
+  function renderExceptions() {
+    R.setText('excCount', String(EXC.length));
+    document.getElementById('excCount').className = 'chip ' + (EXC.length ? 'chip-warn' : 'chip-neutral');
+    if (!EXC.length) {
+      R.setHtml('excTable', R.alertHtml('ok', 'אין חריגים', 'כל הרשומות תואמות את מצבן ברווחית.'));
+      return;
+    }
+    var h = '<div class="t-wrap"><table><thead><tr><th>סוג</th><th>רשומה</th><th>פירוט</th></tr></thead><tbody>';
+    EXC.forEach(function (e) {
+      h += '<tr><td><span class="chip ' + R.esc(e.cls) + '">' + R.esc(e.kind) + '</span></td>' +
+           '<td>' + R.esc(e.subject || '') + '</td>' +
+           '<td class="small">' + R.esc(e.detail) + '</td></tr>';
+    });
+    R.setHtml('excTable', h + '</tbody></table></div>');
+  }
+
+  async function collectExceptions() {
+    EXC = [];
+    var modules = ['Invoices', 'Sales_Orders'];
+    for (var mi = 0; mi < modules.length; mi++) {
+      var mod = modules[mi];
+      try {
+        await R.resolveFields(mod);
+        // COQL and searchRecords are unavailable in the embedded widget SDK, so
+        // this pages getAllRecords. The cap is stated on screen rather than
+        // silently truncating a receivables report.
+        var page = 1, scanned = 0, MAXPAGES = 5;
+        while (page <= MAXPAGES) {
+          var res = await ZOHO.CRM.API.getAllRecords({ Entity: mod, page: page, per_page: 200 });
+          var recs = (res && res.data) || [];
+          if (!recs.length) break;
+          recs.forEach(function (rec) {
+            scanned++;
+            var num = R.getField(mod, rec, 'Rivhit_Document_Number');
+            var ref = R.getField(mod, rec, 'Rivhit_Request_Reference');
+            var confSt = R.getField(mod, rec, 'Rivhit_Confirmation_Status');
+            var drift = R.getField(mod, rec, 'Rivhit_Record_Drift');
+            var subj = rec.Subject || rec.Name || rec.id;
+            if (ref && !num) {
+              EXC.push({ kind: 'שחזור נדרש', cls: 'chip-err', subject: subj,
+                detail: 'קיים מפתח ייחודיות ללא מסמך משויך — הרץ שחזור לפני הפקה חוזרת.' });
+            }
+            if (confSt === 'Missing' || confSt === 'Retry Failed') {
+              EXC.push({ kind: 'מספר הקצאה חסר', cls: 'chip-warn', subject: subj,
+                detail: 'מסמך ' + (num || '—') + ' הופק ללא מספר הקצאה. הלקוח עלול שלא לקזז מע״מ תשומות.' });
+            }
+            if (drift) {
+              EXC.push({ kind: 'שינוי לאחר הפקה', cls: 'chip-warn', subject: subj,
+                detail: 'הרשומה שונתה אחרי שהמסמך הופק. ראה הערות ברשומה.' });
+            }
+          });
+          if (recs.length < 200) break;
+          page++;
+        }
+        if (page > MAXPAGES) {
+          EXC.push({ kind: 'סריקה קטועה', cls: 'chip-neutral', subject: mod,
+            detail: 'נסרקו ' + scanned + ' רשומות בלבד (תקרת ' + (MAXPAGES * 200) + '). ייתכנו חריגים נוספים.' });
+        }
+      } catch (e) { R.dbg('exception scan failed for ' + mod, e); }
+    }
+    renderExceptions();
+  }
+
+  async function load() {
+    R.setHtml('openTable', '<div class="center" style="padding:24px"><span class="spinner"></span></div>');
+    try {
+      var params = { customer_id: 0, accounting_only: true };
+      var fd = R.val('fromDate'), td = R.val('toDate');
+      if (fd) params.from_date = R.toRivhitDate(fd);
+      if (td) params.until_date = R.toRivhitDate(td);
+      var d = await R.callFn('rv_lookup', { op: 'openDocuments', params: params });
+      ROWS = (d && d.open_documents) || [];
+      renderOpen();
+      R.setText('windowNote',
+        'החלון מוגבל בכוונה — קריאה ללא טווח תאריכים עלולה לחרוג ממגבלת גודל התשובה. ' +
+        'הוצגו ' + ROWS.length + ' מסמכים.');
+    } catch (e) { R.showError('openTable', e); }
+  }
+
+  async function init() {
+    try {
+      await R.boot({ entities: ['Invoices'] });
+      R.show('loading', false);
+      if (!R.isConfigured()) {
+        R.show('err', true);
+        R.setHtml('err', R.alertHtml('error', R.t('notConfigured'), ''));
+        return;
+      }
+      R.show('main', true);
+      var days = Number(R.settings().reconcileWindowDays || 35);
+      var from = new Date(Date.now() - days * 86400000);
+      document.getElementById('fromDate').value = from.toISOString().substring(0, 10);
+      document.getElementById('toDate').value = new Date().toISOString().substring(0, 10);
+
+      var map = { tabOpen: 'panOpen', tabExc: 'panExc' };
+      Object.keys(map).forEach(function (tid) {
+        R.on(tid, 'click', function () {
+          Object.keys(map).forEach(function (o) {
+            var sel = o === tid;
+            document.getElementById(o).setAttribute('aria-selected', sel ? 'true' : 'false');
+            document.getElementById(map[o]).hidden = !sel;
+          });
+        });
+      });
+      R.on('btnLoad', 'click', load);
+      R.on('btnClose', 'click', R.closePopup);
+      await load();
+      R.setHtml('excTable', '<div class="center" style="padding:24px"><span class="spinner"></span></div>');
+      collectExceptions();
+    } catch (e) {
+      R.show('loading', false); R.show('err', true); R.showError('err', e);
+    }
+  }
+  init();
+})();
+</script>
+</body>
+</html>

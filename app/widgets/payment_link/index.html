@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>קישור לתשלום</title>
+<link rel="stylesheet" href="../../rv-styles.css">
+<script src="https://live.zwidgets.com/js-sdk/1.5/ZohoEmbededAppSDK.min.js"></script>
+<script src="../../rv-api.js"></script>
+</head>
+<body>
+
+<div id="loading" class="center" style="padding:40px 0"><span class="spinner lg"></span><div class="muted">טוען…</div></div>
+<div id="err" class="hidden"></div>
+
+<div id="main" class="hidden">
+  <h1>קישור לתשלום באשראי</h1>
+  <p class="sub" id="sub"></p>
+  <div id="modeBox"></div>
+  <div id="doubleWarn"></div>
+
+  <div class="card">
+    <div class="row">
+      <div class="field">
+        <label for="amount">סכום לחיוב</label>
+        <input type="number" id="amount" step="0.01" min="0.01">
+        <div class="hint" id="amountHint"></div>
+      </div>
+      <div class="field">
+        <label for="maxPayments">מספר תשלומים מקסימלי</label>
+        <input type="number" id="maxPayments" min="1" max="36" value="1">
+      </div>
+    </div>
+    <div class="check" id="ackBox" style="display:none">
+      <input type="checkbox" id="ackDouble">
+      <label for="ackDouble">אני מבין שייווצר מסמך מס נוסף ומאשר בכל זאת</label>
+    </div>
+  </div>
+
+  <div id="result"></div>
+  <div class="btn-row">
+    <button class="btn btn-primary" id="btnCreate">יצירת קישור</button>
+    <button class="btn btn-ghost" id="btnClose">סגירה</button>
+  </div>
+</div>
+
+<div id="done" class="hidden">
+  <h1>הקישור נוצר</h1>
+  <div class="card">
+    <div class="field">
+      <label for="urlBox">כתובת דף התשלום</label>
+      <input type="text" id="urlBox" class="mono-in" readonly>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btnCopy">העתקה</button>
+      <a id="openLink" class="btn" target="_blank" rel="noopener">פתיחה</a>
+      <button class="btn" id="btnEmail">שליחה במייל ללקוח</button>
+    </div>
+    <div id="copyMsg" class="small muted" style="margin-top:8px"></div>
+  </div>
+  <div class="alert alert-info small" id="afterInfo"></div>
+  <div class="btn-row"><button class="btn btn-ghost" id="btnDoneClose">סגירה</button></div>
+</div>
+
+<script>
+(function () {
+  var R = RivhitAPI;
+  var CTX, REC, S = {}, curId = 1;
+  function f(k) { return R.getField(CTX.module, REC, k); }
+
+  async function init() {
+    try {
+      CTX = await R.boot({ entities: ['Invoices', 'Sales_Orders'] });
+      S = R.settings();
+      REC = await R.getRecord(CTX.module, CTX.recordId);
+      R.show('loading', false);
+      if (!REC) throw new Error('הרשומה לא נמצאה');
+      if (!S.icreditEnabled) {
+        R.show('err', true);
+        R.setHtml('err', R.alertHtml('error', 'iCredit אינה מופעלת', 'הפעל את השירות בהגדרות רווחית.'));
+        return;
+      }
+      curId = Number(f('Rivhit_Currency_ID')) || R.isoToCurrencyId(REC.Currency) || 1;
+      var total = Number(REC.Grand_Total || REC.Sub_Total || 0);
+      var paid = Number(f('Rivhit_Paid_Amount')) || 0;
+      var outstanding = R.round2(total - paid);
+      if (outstanding <= 0) outstanding = total;
+
+      R.setText('sub', (REC.Subject || '') + ' · ' + R.money(total, curId));
+      document.getElementById('amount').value = outstanding.toFixed(2);
+      R.setText('amountHint', 'יתרה פתוחה: ' + R.money(outstanding, curId) +
+        (curId !== 1 ? ' — ודא שדף התשלום מוגדר למטבע זה' : ''));
+
+      R.setHtml('modeBox', R.alertHtml(S.icreditTestMode ? 'warn' : 'info',
+        S.icreditTestMode ? 'מצב בדיקה' : 'סביבת ייצור',
+        S.icreditIssuesDocument
+          ? 'iCredit תפיק את מסמך המס ותשלח אותו ללקוח. ההרחבה רק תרשום אותו.'
+          : 'ההרחבה תפיק קבלה ברווחית לאחר התשלום.'));
+
+      var existingDoc = f('Rivhit_Document_Number');
+      if (S.icreditIssuesDocument && existingDoc) {
+        R.setHtml('doubleWarn', R.alertHtml('error', 'כבר קיים מסמך מס לרשומה זו',
+          'מסמך ' + existingDoc + '. iCredit מוגדרת להפיק מסמך בעצמה, כך שתשלום דרך הקישור ייצור מסמך מס שני. ' +
+          'עדיף לרשום תשלום מול המסמך הקיים.'));
+        document.getElementById('ackBox').style.display = '';
+        document.getElementById('btnCreate').disabled = true;
+        R.on('ackDouble', 'change', function () {
+          document.getElementById('btnCreate').disabled = !R.checked('ackDouble') || !R.can('paymentLink');
+        });
+      }
+
+      R.show('main', true);
+      R.gate('paymentLink', 'btnCreate');
+
+      R.on('btnCreate', 'click', async function () {
+        document.getElementById('btnCreate').disabled = true;
+        R.setHtml('result', '<span class="spinner"></span> יוצר קישור…');
+        try {
+          var d = await R.callFn('rv_icredit_get_url', {
+            module: CTX.module, recordId: CTX.recordId,
+            amount: Number(R.val('amount')),
+            maxPayments: Number(R.val('maxPayments')) || 1,
+            acknowledgeDoubleIssue: R.checked('ackDouble')
+          });
+          R.show('main', false); R.show('done', true);
+          document.getElementById('urlBox').value = d.url;
+          document.getElementById('openLink').href = d.url;
+          R.setHtml('afterInfo',
+            'לאחר תשלום מוצלח iCredit תשלח הודעת IPN וההרחבה תעדכן את הרשומה אוטומטית. ' +
+            (d.icreditIssuesDocument
+              ? 'מסמך המס יופק על ידי iCredit.'
+              : 'ההרחבה תפיק קבלה ברווחית ותסגור את המסמך.'));
+        } catch (e) {
+          document.getElementById('btnCreate').disabled = false;
+          R.showError('result', e);
+        }
+      });
+
+      R.on('btnCopy', 'click', function () {
+        var el = document.getElementById('urlBox');
+        el.select();
+        try { document.execCommand('copy'); R.setText('copyMsg', 'הועתק ללוח'); }
+        catch (e) { R.setText('copyMsg', 'העתק ידנית מהשדה'); }
+      });
+
+      R.on('btnEmail', 'click', function () {
+        var to = '', acct = REC.Account_Name || {}, cont = REC.Contact_Name || {};
+        to = REC.Email || acct.email || cont.email || '';
+        var subject = 'קישור לתשלום — ' + (REC.Subject || '');
+        var body = 'שלום,\n\nלתשלום החשבונית יש להיכנס לקישור הבא:\n' +
+                   document.getElementById('urlBox').value + '\n\nתודה.';
+        window.open('mailto:' + encodeURIComponent(to) +
+                    '?subject=' + encodeURIComponent(subject) +
+                    '&body=' + encodeURIComponent(body), '_blank');
+      });
+
+      R.on('btnClose', 'click', R.closePopup);
+      R.on('btnDoneClose', 'click', R.closeReload);
+    } catch (e) {
+      R.show('loading', false); R.show('err', true); R.showError('err', e);
+    }
+  }
+  init();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>רענון סטטוס מרווחית</title>
+<link rel="stylesheet" href="../../rv-styles.css">
+<script src="https://live.zwidgets.com/js-sdk/1.5/ZohoEmbededAppSDK.min.js"></script>
+<script src="../../rv-api.js"></script>
+</head>
+<body>
+
+<div id="loading" class="center" style="padding:40px 0">
+  <span class="spinner lg"></span>
+  <div class="muted" id="loadingMsg">מרענן מול רווחית…</div>
+</div>
+
+<div id="err" class="hidden"></div>
+
+<div id="done" class="hidden center">
+  <div style="font-size:42px" id="doneIcon">✅</div>
+  <h1 id="doneTitle">הסטטוס עודכן</h1>
+  <div class="card" style="text-align:start"><dl class="kv" id="kv"></dl></div>
+  <div id="extras"></div>
+  <div class="btn-row" style="justify-content:center">
+    <a id="docLink" class="btn btn-primary" target="_blank" rel="noopener">פתיחת המסמך</a>
+    <button class="btn btn-ghost" id="btnConfirm">בקשת מספר הקצאה</button>
+    <button class="btn btn-ghost" id="btnClose">סגירה</button>
+  </div>
+  <div id="confirmResult" style="margin-top:12px"></div>
+</div>
+
+<script>
+(function () {
+  var R = RivhitAPI;
+  var CTX, REC;
+  function f(k) { return R.getField(CTX.module, REC, k); }
+
+  async function init() {
+    try {
+      CTX = await R.boot({ entities: ['Invoices', 'Sales_Orders'] });
+      REC = await R.getRecord(CTX.module, CTX.recordId);
+      if (!REC) throw new Error('הרשומה לא נמצאה');
+      var docType = f('Rivhit_Document_Type');
+      var docNum = f('Rivhit_Document_Number');
+      if (!docNum) {
+        R.show('loading', false); R.show('err', true);
+        R.setHtml('err', R.alertHtml('error', 'טרם הופק מסמך', 'אין מה לרענן עבור רשומה זו.'));
+        return;
+      }
+
+      // One call gives everything: is_closed, is_cancelled, receipt_total,
+      // confirmation_number, and the payment rows that drive instalment progress.
+      R.setText('loadingMsg', 'שולף פרטי מסמך ' + docNum + '…');
+      var d = await R.callFn('rv_lookup', {
+        op: 'documentDetails',
+        params: { document_type: Number(docType), document_number: Number(docNum) }
+      });
+
+      var curId = Number(f('Rivhit_Currency_ID')) || 1;
+      var total = Number(d.document_total) || 0;
+      var received = Number(d.receipt_total) || 0;
+      var isClosed = !!d.is_closed;
+      var isCancelled = !!d.is_cancelled;
+      var confNum = d.confirmation_number ? String(d.confirmation_number) : '';
+
+      var status = 'Issued';
+      if (isCancelled) status = 'Cancelled';
+      else if (isClosed || (total > 0 && received >= total - 0.01)) status = 'Paid';
+      else if (received > 0) status = 'Partially Paid';
+
+      // Instalment progress from the document's own payment rows.
+      var rows = d.payments || [];
+      var instTotal = rows.length, elapsed = 0, nextDate = '', nextAmt = 0;
+      if (instTotal > 1) {
+        var today = new Date(); today.setHours(0, 0, 0, 0);
+        rows.forEach(function (p) {
+          var iso = R.fromRivhitDate(p.due_date);
+          if (!iso) return;
+          var dt = new Date(iso + 'T00:00:00');
+          if (dt <= today) elapsed++;
+          else if (!nextDate) { nextDate = iso; nextAmt = Number(p.amount) || 0; }
+        });
+        if (elapsed < 1) elapsed = 1;
+      }
+
+      var upd = { id: CTX.recordId };
+      upd[R.fieldName(CTX.module, 'Rivhit_Payment_Status')] = status;
+      upd[R.fieldName(CTX.module, 'Rivhit_Paid_Amount')] = R.round2(received);
+      upd[R.fieldName(CTX.module, 'Rivhit_Is_Closed')] = isClosed || isCancelled;
+      if (confNum && confNum !== '0') {
+        upd[R.fieldName(CTX.module, 'Rivhit_Confirmation_Number')] = confNum;
+        upd[R.fieldName(CTX.module, 'Rivhit_Confirmation_Status')] = 'Obtained';
+      }
+      if (status === 'Paid') upd[R.fieldName(CTX.module, 'Rivhit_Paid_Date')] = new Date().toISOString().substring(0, 10);
+      if (instTotal > 1) {
+        upd[R.fieldName(CTX.module, 'Rivhit_Instalments_Total')] = instTotal;
+        upd[R.fieldName(CTX.module, 'Rivhit_Instalments_Elapsed')] = elapsed;
+        upd[R.fieldName(CTX.module, 'Rivhit_Instalment_Progress')] = elapsed + '/' + instTotal;
+        if (nextDate) {
+          upd[R.fieldName(CTX.module, 'Rivhit_Next_Instalment_Date')] = nextDate;
+          upd[R.fieldName(CTX.module, 'Rivhit_Instalment_Amount')] = R.round2(nextAmt);
+        }
+      }
+      var res = await R.crmUpdateResilient(CTX.module, upd);
+
+      // Timestamp separately — one rejected field must not undo the rest.
+      try {
+        var t = { id: CTX.recordId };
+        t[R.fieldName(CTX.module, 'Rivhit_Last_Sync')] = R.zohoNow();
+        await R.crmUpdateResilient(CTX.module, t);
+      } catch (e) { R.dbg('timestamp skipped', e); }
+
+      R.show('loading', false);
+      R.show('done', true);
+      if (isCancelled) { R.setText('doneIcon', '🚫'); R.setText('doneTitle', 'המסמך מבוטל'); }
+      else if (status === 'Paid') R.setText('doneTitle', 'שולם במלואו');
+      else if (status === 'Partially Paid') { R.setText('doneIcon', '◐'); R.setText('doneTitle', 'שולם חלקית'); }
+      else { R.setText('doneIcon', '📄'); R.setText('doneTitle', 'המסמך פתוח'); }
+
+      var h = '';
+      function row(k, v) { h += '<dt>' + R.esc(k) + '</dt><dd>' + v + '</dd>'; }
+      row('מסמך', R.esc(d.document_type || R.typeName(docType)) + ' ' + R.ltrHtml(docNum));
+      row('סטטוס', R.statusChip(status));
+      row('סה״כ', R.ltrHtml(R.money(total, curId)));
+      row('שולם', R.ltrHtml(R.money(received, curId)));
+      row('יתרה', R.ltrHtml(R.money(R.round2(total - received), curId)));
+      if (d.vat_percent) row('מע״מ', R.ltrHtml(d.vat_percent + '%'));
+      row('מספר הקצאה', confNum ? R.ltrHtml(confNum) : R.confirmationChip(f('Rivhit_Confirmation_Status')));
+      if (instTotal > 1) {
+        row('תשלומים', R.ltrHtml(elapsed + '/' + instTotal));
+        if (nextDate) row('תשלום הבא', R.displayDate(nextDate) + ' · ' + R.ltrHtml(R.money(nextAmt, curId)));
+      }
+      row('עודכן', R.displayDateTime(new Date().toISOString()));
+      R.setHtml('kv', h);
+
+      var extras = '';
+      if (res.dropped && res.dropped.length) {
+        extras += R.alertHtml('warn', 'נשמר, אך שדות מסוימים נדחו',
+          res.dropped.join(' · ') + ' — בדוק את הגדרת השדות ב-CRM.');
+      }
+      if (!confNum && R.settings().confirmationRequired) {
+        extras += R.alertHtml('warn', 'למסמך אין מספר הקצאה',
+          'ניתן לבקש מספר הקצאה בדיעבד בכפתור שלמטה.');
+      } else {
+        document.getElementById('btnConfirm').classList.add('hidden');
+      }
+      R.setHtml('extras', extras);
+
+      var url = f('Rivhit_Document_URL');
+      if (url) document.getElementById('docLink').href = url;
+      else document.getElementById('docLink').classList.add('hidden');
+
+      R.on('btnConfirm', 'click', async function () {
+        R.setHtml('confirmResult', '<span class="spinner"></span> מבקש…');
+        try {
+          var c = await R.callFn('rv_confirmation', { module: CTX.module, recordId: CTX.recordId });
+          R.setHtml('confirmResult', R.alertHtml('ok', 'התקבל מספר הקצאה', String(c.confirmationNumber || '')));
+        } catch (e) { R.setHtml('confirmResult', R.alertHtml('error', (e && e.message) || 'הבקשה נכשלה', '')); }
+      });
+      R.on('btnClose', 'click', R.closeReload);
+    } catch (e) {
+      R.show('loading', false); R.show('err', true); R.showError('err', e);
+    }
+  }
+  init();
+})();
+</script>
+</body>
+</html>

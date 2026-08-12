@@ -118,6 +118,12 @@ if(op == "settings")
 	s.put("icreditEnabled",icEnabled == "true");
 	s.put("icreditIssuesDocument",icIssues == "true");
 	s.put("icreditTestMode",icTest == "true");
+	s.put("approverId",ifnull(zoho.crm.getOrgVariable(prefix + "Approver_ID_Number"),"").toString());
+	s.put("ipnUrl",ifnull(zoho.crm.getOrgVariable(prefix + "ICredit_IPN_URL"),"").toString());
+	s.put("ipnFailUrl",ifnull(zoho.crm.getOrgVariable(prefix + "ICredit_IPN_Failure_URL"),"").toString());
+	s.put("redirectUrl",ifnull(zoho.crm.getOrgVariable(prefix + "ICredit_Redirect_URL"),"").toString());
+	s.put("reconcileWindowDays",ifnull(zoho.crm.getOrgVariable(prefix + "Reconcile_Window_Days"),"35").toString());
+	s.put("healthState",ifnull(zoho.crm.getOrgVariable(prefix + "Health_State"),"").toString());
 	docTypes = List();
 	recTypes = List();
 	payTypes = List();

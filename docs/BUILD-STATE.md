@@ -1,69 +1,86 @@
-# Build state — resume here
+# Build state
 
-Implementation started 2026-08-11. Design is complete and frozen; this tracks the code.
+**V1.0-r1 — feature complete, never executed.** Every file the design calls for exists and
+the build is green. Nothing here has run against a live Rivhit account, a real Deluge
+compiler, or a Zoho org.
 
 Branch: `claude/zoho-rivhit-integration-design-jvuppp`
-Version marker in progress: **`V1.0-r1`** (must match across `rv-api.js`, every widget,
-`plugin-manifest.json` and the zip name once `build.py` exists).
 
 ---
 
-## Done
+## What exists
 
-| File | What it is |
-|---|---|
-| `app/plugin-manifest.json` | 15 widget registrations (both Sales Orders and Invoices), 16 scopes incl. `settings.profiles.READ` + `users.READ` |
-| `app/rv-styles.css` | RTL-first shared stylesheet, light/dark-neutral, `bdi.ltr` for document numbers |
-| `app/rv-api.js` | Shared widget client: Deluge bridge, envelope unwrapping, runtime field resolution, i18n (he default), bidi helpers, currency/date formatting, permission gating (UX layer), `crmUpdateResilient`, widget bootstrap |
-| `functions/rv_lookup.deluge` | Read-only whitelist + `op:settings` + `op:types` catalog refresh + `op:profiles` |
-| `functions/rv_save_settings.deluge` | Org-variable persistence, blank-secret-keeps-existing, **no-self-lockout guard**, write-then-readback verification |
-| `functions/rv_issue_document.deluge` | The core write. Type flags from catalog, line-item mapper with line-total rounding, inline customer matching, **dry run without the idempotency key (review C1)**, key persisted before the call, ambiguity → recover, confirmation-number capture, snapshot, audit note, usage counter |
-| `functions/rv_issue_receipt.deluge` | Receipt that closes the source document (`closed_document_*` + `document_is_receipt`), same safe-write sequence, `Rivhit_Receipts` child row, `internal:true` bypass so the IPN handler can call it |
+```
+app/
+  plugin-manifest.json      15 widget registrations, 16 scopes
+  rv-api.js                 shared client (inlined into every widget at build)
+  rv-styles.css             RTL-first stylesheet
+  widgets/                  9 widgets
+    settings/               connection · catalog · defaults · iCredit · permissions
+    issue_document/         dry run → confirm → issue, with recovery and drift banner
+    record_payment/         receipt, or manual settlement / reopen
+    payment_link/           iCredit GetUrl with the double-issue guard
+    refresh_status/         one Document.Details call
+    cancel_document/        typed confirmation, both halves for invoice-receipt
+    customer_sync/          cursor-batched, Continue button
+    product_sync/           cursor-batched, optional stock pull
+    ar_report/              Customer.OpenDocuments + exceptions
+functions/                  15 Deluge bodies
+tests/rv-api.test.js        34 tests
+build.py                    validate → hygiene → test gate → inline → zip
+docs/SIGMA-DEPLOYMENT.md    click-by-click install
+```
 
-## Remaining
+`python3 build.py` → `rivhit-bridge-V1.0-r1.zip` (126 KB).
 
-**Deluge functions (11)**
+## What the build gate enforces
 
-- `rv_close_document` — `Document.Close` / `Reopen`; manual settlement (`closing_type:0`)
-- `rv_cancel_document` — `Document.Cancel`, **plus `Receipt.Cancel` when the type is
-  invoice-receipt** — both as one unit of work
-- `rv_confirmation` — `Document.InvoiceApproval` retry for a missing allocation number
-- `rv_recover_request` — `Status.LastRequest`, with `Document.List` + `filter_fields` on
-  `reference` as the independent second path (review W1)
-- `rv_upsert_customer` — the five-rung ladder, 9-char `acc_ref` surrogate, verified on match
-- `rv_sync_products` — `Item.*`, cursor-batched
-- `rv_reconcile` — scheduled; `Customer.OpenDocuments` windowed, cursor-resumable (review C3/C4),
-  instalment progress from the document's payment rows, token health check (review W3)
-- `rv_icredit_get_url` — `GetUrl` with currency pass-through, both IPN URLs, `Custom1` =
-  `Module:recordId`
-- `rv_icredit_ipn` — **claim `ICredit_Sale_ID` on the unique field first** (review C2), then
-  Verify → token → replay → amount; records the iCredit-issued document, then `Document.Details`
-  for the confirmation number
-- `rv_icredit_ipn_failure` — records declined attempts, changes nothing else
-- `rv_log_change` — workflow-triggered drift note (Automation category, record argument)
+Beyond the obvious (manifest valid, JS parses, marker present, every widget RTL):
 
-**Widgets (9)** — `settings` (largest: connection, catalog, roles, payment map, iCredit,
-permissions matrix), `issue_document`, `record_payment`, `payment_link`, `refresh_status`,
-`cancel_document`, `customer_sync`, `product_sync`, `ar_report`
+- **No signature line** in any Deluge body — Sigma writes the wrapper, and a signature is a
+  syntax error on the last line.
+- **Every REST function carries the argument-extraction prologue.** Sigma has no shared
+  library, so the ~45-line prologue is copy-pasted; the build asserts it rather than trusting
+  discipline. Exempt: `rv_reconcile` and `rv_log_change` (no `crmAPIRequest`), and the two IPN
+  endpoints (form-encoded vendor POSTs, not the widget's `arguments` wrapper).
+- **No `addAll`** — unreliable on this platform.
+- **A guaranteed `return`** in every body.
+- **The C1 trap**: a `check_only` dry run must never set `request_reference` or
+  `prevent_duplicates` before `check_only` is removed, and `check_only` must always be
+  removed. If Rivhit registers the key during validation, the real call is refused as a
+  duplicate and no document is ever created — the safeguard becoming the failure.
+- **Tests must pass** or no zip is produced.
+- Manifest and disk must agree on the widget list, both directions.
 
-**Tooling** — `build.py` (validate → `node --test` gate → inline shared assets → syntax-check
-every inline block → zip), `tests/` (the pure functions in `rv-api.js`: `_resolveOne`,
-`_unwrap`, date conversion both ways, currency, `acc_ref` surrogate, permission evaluation,
-`esc`), and `docs/SIGMA-DEPLOYMENT.md` — the full click-by-click Sigma guide.
+## Before this is trusted with real money
 
----
+In order. Do not skip ahead.
 
-## Conventions already established — keep these
+1. **Paste `rv_lookup` and `rv_save_settings` into Sigma and get Settings connecting.**
+   Nothing else can be tested until the config round-trips. Expect Deluge compile errors on
+   first paste — the bodies have never seen a compiler.
+2. **Answer C1 with the vendor** (`docs/DESIGN-REVIEW.md`): does `check_only` register the
+   `request_reference` when `prevent_duplicates` is also sent? The build guards the *shape*
+   of the call, but the assumption underneath is still unverified.
+3. **Measure the org's Deluge integration-task ceiling.** `rv_reconcile` uses a
+   `DETAIL_BUDGET` of 15 and the sync functions default to batches of 12; both are
+   conservative guesses, not measurements.
+4. Work the smoke test in `SIGMA-DEPLOYMENT.md` §14 on the demo account.
+5. Only then §15, production.
 
-- **Deluge functions are self-contained.** Sigma has no shared library, so the ~45-line
-  argument-extraction prologue is copy-pasted verbatim into every function. Keep it identical;
-  `build.py` should assert that.
-- **Envelope:** every function returns `{ok, code, message, data}` as a JSON string, and always
-  from a guaranteed **top-level** `return` — a return inside `try/catch` does not compile.
-- **Field resolution:** scan the fetched record's own keys with `endsWith("Rivhit_...")` rather
-  than assuming plain or namespaced names.
-- **Two-stage CRM writes:** critical fields first, timestamps and long text in a separate
-  best-effort call, because one rejected field kills the whole update.
-- **Hebrew is the default**; every user-facing string in the functions is Hebrew
-  (`client_message` passes straight through), and the docs stay English.
-- **Never send `request_reference` / `prevent_duplicates` on a `check_only` call.**
+## Known gaps
+
+- **`Rivhit_Receipts` field API names are assumed.** The Deluge writes them directly
+  (`Receipt_Number`, `Processing_State`, …) rather than resolving them at runtime the way the
+  Invoice fields are resolved. If Zoho namespaces them on creation, those writes fail
+  silently. Verify after step 4 of the guide and add resolution if needed.
+- **`rv_lookup op:profiles`** tries a v5 REST call with a named connection, then falls back to
+  `invokeConnector`. Neither path is verified; the permissions matrix degrades to a warning
+  if both fail, and server-side enforcement continues on the stored config.
+- **Instalment progress** is only refreshed by `rv_reconcile` and the refresh widget, so a
+  card sale's `1/12` will not advance until the next scheduled run after each due date.
+- **The AR report's exception scan** pages `getAllRecords` with a 5-page cap per module and
+  states the cap on screen. Above ~1,000 records per module it under-reports, by design
+  rather than silently.
+- **No Hebrew round-trip test through `invokeurl`.** Encoding failures would show up as
+  mojibake on a real invoice; worth an explicit test on the demo account.
