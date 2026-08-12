@@ -1,77 +1,394 @@
 # Sigma deployment guide — Rivhit Bridge V1.0-r1
 
-Click-by-click. Follow it in order: the widgets fail loudly if the fields, org
-variables and functions are not already there.
+**Ordered so the most likely failures surface first.**
 
-Budget about **2–3 hours** for a first install, most of it creating fields.
+The obvious order — fields, then variables, then functions, then widgets — is the wrong one.
+It spends an hour creating forty custom fields before a single line of Deluge has been
+compiled. This guide inverts that: everything that can fail cheaply is tested before anything
+expensive is built.
 
-Extension namespace: `rivhitzohocrmextension` · Publisher: **1T Solutions and Experts**
+| Phase | What it proves | Time | Needs Rivhit? |
+|---|---|---|---|
+| **A** | The code compiles and the bundle loads | 40 min | no |
+| **B** | Configuration round-trips | 20 min | no |
+| **C** | Rivhit answers us | 10 min | demo, reads only |
+| **D** | The C1 idempotency assumption holds | 5 min | demo, 1 document |
+| **E** | Fields and the receipts module exist | 60 min | no |
+| **F** | Zoho-side behaviour is correct | 30 min | no |
+| **G** | Documents issue end to end | 45 min | demo, real documents |
+| **H** | Card payments work | 30 min | iCredit test |
+| **I** | Production | 30 min | production |
 
-> **Do the whole thing against the Rivhit demo account first.** There is no separate
-> sandbox host — test and production share `api.rivhit.co.il` and differ only by which
-> account the token belongs to. A production token in step 12 issues real legal documents
-> from your very first click.
+**Stop at the first phase that fails.** Each one is a gate; continuing past a red gate means
+debugging two problems at once.
 
----
+Namespace `rivhitzohocrmextension` · Publisher **1T Solutions and Experts**
 
-## 0. Prerequisites
+> There is no separate Rivhit sandbox host. Test and production share `api.rivhit.co.il` and
+> differ only by which account the token belongs to. A production token in phase C issues real
+> legal documents from your first click.
 
-**On the Rivhit side**
-
-| | |
-|---|---|
-| Rivhit **Online** or **Invoice Online** | The desktop version has no API |
-| API token | Rivhit Online → הגדרות → API → הצג API TOKEN |
-| Company ID | Same screen; used to build PDF links |
-| Tax Authority link (חשבוניות ישראל) | Must be enabled **under the same Rivhit user that owns the API token**. Under any other user, documents issue with no allocation number and your customers cannot deduct input VAT. |
-
-Demo credentials for the dry run: user `demo`, password `123`, VAT `123`, token
-`DECD03E5-E35C-41E8-84F7-FBA2FB483928` at <https://online1.rivhit.co.il/loginmanager/login>.
-The demo account is **not** connected to iCredit, so card flows need a separate iCredit test token.
-
-**On the Zoho side**
-
-- Administrator profile.
-- Invoices, Sales Orders, Accounts, Contacts and Products modules enabled.
-- Node 18+ and Python 3 locally, to run the build.
+Reference tables (fields, org variables, troubleshooting) are in the appendices at the end.
 
 ---
 
-## 1. Build the bundle
+# Phase A — does the code even parse?
+
+Highest error yield per minute. The Deluge bodies are hand-written and have never seen a
+compiler; expect to fix things here, and it is far cheaper to fix them now.
+
+### A1. Create the extension
+
+<https://sigma.zoho.com> → **Create Extension** → **Zoho CRM**.
+
+- Name: `Rivhit Bridge`
+- Namespace: **`rivhitzohocrmextension`** — must match exactly. Every namespaced field lookup
+  and org-variable read depends on it, and a typo here fails silently everywhere later.
+- **Extension for a single organisation** (private).
+
+### A2. Paste all 15 Deluge functions
+
+**Functions → Create Function**, one per file. Paste the **body only** — a signature line in
+the body is a syntax error, because Sigma writes the wrapper itself.
+
+Paste in this order. It is not arbitrary: the first four exercise every construct the rest
+use, so a systemic problem (a Deluge dialect difference, a `Map()` idiom that does not
+compile) shows up in the first ten minutes rather than the last.
+
+| # | File | Category | Return | Argument |
+|---|---|---|---|---|
+| 1 | `rv_lookup.deluge` | REST API | STRING | `crmAPIRequest` (Map) |
+| 2 | `rv_save_settings.deluge` | REST API | STRING | `crmAPIRequest` (Map) |
+| 3 | `rv_issue_document.deluge` | REST API | STRING | `crmAPIRequest` (Map) |
+| 4 | `rv_icredit_ipn.deluge` | REST API | STRING | `crmAPIRequest` (Map) |
+| 5 | `rv_issue_receipt.deluge` | REST API | STRING | `crmAPIRequest` (Map) |
+| 6 | `rv_close_document.deluge` | REST API | STRING | `crmAPIRequest` (Map) |
+| 7 | `rv_cancel_document.deluge` | REST API | STRING | `crmAPIRequest` (Map) |
+| 8 | `rv_confirmation.deluge` | REST API | STRING | `crmAPIRequest` (Map) |
+| 9 | `rv_recover_request.deluge` | REST API | STRING | `crmAPIRequest` (Map) |
+| 10 | `rv_upsert_customer.deluge` | REST API | STRING | `crmAPIRequest` (Map) |
+| 11 | `rv_sync_products.deluge` | REST API | STRING | `crmAPIRequest` (Map) |
+| 12 | `rv_icredit_get_url.deluge` | REST API | STRING | `crmAPIRequest` (Map) |
+| 13 | `rv_icredit_ipn_failure.deluge` | REST API | STRING | `crmAPIRequest` (Map) |
+| 14 | `rv_reconcile.deluge` | REST API | STRING | *(no arguments)* |
+| 15 | `rv_log_change.deluge` | **Automation** | STRING | `recId` (String), `moduleArg` (String) |
+
+**Save each one and confirm it compiles before moving to the next.**
+
+> If the editor reports an error on the *last* line, you almost certainly pasted a signature
+> line along with the body. Delete any leading `string rv_xxx(map crmAPIRequest)`.
+
+### A3. Publish the two IPN endpoints
+
+Only `rv_icredit_ipn` and `rv_icredit_ipn_failure`.
+
+Open each → **⋯ → REST API** → enable → **API Key**. Copy both URLs:
+
+```
+https://www.zohoapis.com/crm/v2/functions/rv_icredit_ipn/actions/execute?auth_type=apikey&zapikey=…
+https://www.zohoapis.com/crm/v2/functions/rv_icredit_ipn_failure/actions/execute?auth_type=apikey&zapikey=…
+```
+
+### A4. Build and upload the widgets
 
 ```bash
 cd Rivhit-
-python3 build.py
+python3 build.py        # → rivhit-bridge-V1.0-r1.zip
 ```
 
-The build validates the manifest, checks every Deluge body for a stray signature line and
-for the `check_only` idempotency trap, **runs the test suite and refuses to zip if it is
-red**, inlines the shared JS/CSS into every widget, syntax-checks each inlined block, and
-asserts every widget opens RTL.
+**Widgets → Upload** the zip → confirm 15 registrations appear → **Publish (major)** →
+install into the org → **accept the scopes** (Appendix C).
 
-Output: `rivhit-bridge-V1.0-r1.zip` (~126 KB).
+### A5. 🚦 GATE — open Settings
 
-> Widgets must be self-contained: Zoho's widget CDN intermittently 404s shared asset files.
-> Never edit the files in `dist/` — they are generated.
+Setup → **Marketplace → Installed → Rivhit Bridge → Settings**.
+
+Three things must be true:
+
+1. The widget **renders**, in Hebrew, right-to-left.
+2. The console shows **`[Rivhit API] BUILD V1.0-r1`**. An older marker means the publish or
+   cache did not take — fix that now, or you will spend the next hour debugging code that is
+   not running.
+3. It says the extension is not configured yet. That message is a *success*: it means
+   `rv_lookup` was called, returned a valid envelope, and reported no token.
+
+Passing A5 proves the manifest is valid, the bundle loads, `rv-api.js` parses in the browser,
+RTL works, the Deluge bridge works, and `rv_lookup` compiles and runs — for well under an hour
+and without touching Rivhit or creating a single field.
 
 ---
 
-## 2. Create the extension in Sigma
+# Phase B — does configuration round-trip?
 
-1. <https://sigma.zoho.com> → **Create Extension** → **Zoho CRM**.
-2. Name `Rivhit Bridge`, namespace **`rivhitzohocrmextension`** — it must match exactly or
-   every namespaced field lookup and org-variable read breaks.
-3. Choose **Extension for a single organisation** (private). The code is written to
-   Marketplace standards so this can be flipped later.
+Still no Rivhit. This phase catches namespace typos, which otherwise break everything
+silently and are miserable to diagnose later.
+
+### B1. Create the organisation variables
+
+Sigma editor → **Storage → Organisation Variables**. All **Text**, all values left blank.
+Full list in Appendix B — 29 of them.
+
+### B2. 🚦 GATE — save and reload
+
+In Settings, set **Account type = demo**, **Language = Hebrew**, `Sort code VAT = 100`, then
+**Save**.
+
+- A green "נשמר" means `rv_save_settings` wrote *and read back* every variable. It verifies
+  its own writes; a mismatch is reported rather than assumed away.
+- Reload the widget. The values must still be there.
+
+If a variable reports `mismatch`, its name is wrong or it was never created. Compare against
+Appendix B character by character.
 
 ---
 
-## 3. Custom fields
+# Phase C — does Rivhit answer?
 
-Setup → **Customization → Modules and Fields**. Types and lengths are load-bearing: an
-undersized numeric field rejects writes, and one rejected field kills the entire update.
+Free reads only. Nothing is created.
 
-### 3.1 Invoices **and** Sales Orders — identical set on both
+### C1. Connect the demo account
+
+| | |
+|---|---|
+| API token | `DECD03E5-E35C-41E8-84F7-FBA2FB483928` |
+| User / password | `demo` / `123` |
+| VAT number | `123` |
+
+Paste the token → **Test Connection**.
+
+### C2. 🚦 GATE — green, with a business name
+
+Green plus the business name proves: `invokeurl` works from Deluge, the Rivhit response
+envelope parses, `error_code` is read correctly, and Hebrew comes back readable rather than
+as mojibake.
+
+### C3. Refresh the catalog
+
+**Document types → Refresh catalog from Rivhit.** Every document type, receipt type, payment
+type, currency, bank and sort code in the demo account should appear with its flags
+(`is_invoice_receipt`, `is_accounting`, `price_include_vat`).
+
+An empty or partial catalog means one of the seven TypeList calls failed — check the function
+execution log for the `debug_message`.
+
+> Do **not** map roles yet. The demo account's type codes are not yours; role mapping happens
+> against the production catalog in phase I.
+
+---
+
+# Phase D — settle the C1 idempotency question
+
+Five minutes, one document on the demo account, before anything is built on the assumption.
+
+Using any REST client:
+
+```
+Step 1 — dry run WITH the idempotency key
+POST https://api.rivhit.co.il/online/RivhitOnlineAPI.svc/Document.New
+{
+  "api_token": "DECD03E5-E35C-41E8-84F7-FBA2FB483928",
+  "document_type": 1, "customer_id": 0, "last_name": "בדיקת C1",
+  "price_include_vat": true,
+  "items": [{ "item_id": 0, "quantity": 1, "price_nis": 1, "description": "בדיקה" }],
+  "check_only": true,
+  "request_reference": "c1-probe-001",
+  "prevent_duplicates": true
+}
+
+Step 2 — the real call: same body, same reference, remove "check_only"
+```
+
+| Step 2 returns | Meaning |
+|---|---|
+| `error_code: 0` + a document number | The dry run did **not** consume the key. Safe either way. |
+| a duplicate-operation error | The dry run **did** consume it — the code's defence is load-bearing, not precautionary. Keep it exactly as written. |
+
+Then call `Status.LastRequest` with `c1-probe-001`: it confirms whether the reference was
+recorded, and starts the clock on the retention question.
+
+Either outcome is fine — the shipped code never sends the key on a dry run. This phase exists
+so that fact is *known* rather than assumed. Record the answer in
+`docs/VENDOR-QUESTIONS.md`.
+
+---
+
+# Phase E — build the data model
+
+Now, and not before. If phases A–D had failed, you would have saved this hour.
+
+### E1. Custom fields
+
+Setup → **Customization → Modules and Fields**. Appendix A has the complete tables:
+
+- **Invoices and Sales Orders** — the identical 32-field set on both
+- **Accounts and Contacts** — 11 fields on both
+- **Products** — 6 fields
+
+Types and lengths are load-bearing. An undersized Currency field rejects writes, and one
+rejected field kills the entire update call.
+
+### E2. The `Rivhit_Receipts` module
+
+Appendix A.4. One field needs special attention:
+
+> ### ⚠ `ICredit_Sale_ID` must be created with **Unique** ticked
+>
+> iCredit requires a 200 OK within **1.25 seconds** or it resends, and a Zoho function's cold
+> start alone can exceed that — duplicate deliveries are normal traffic, not an attack. Deluge
+> has no locks, so this constraint **is** the mutex: the IPN handler claims the sale id as its
+> first write and the loser of a race is rejected by the platform. Without it, two concurrent
+> deliveries both proceed and the customer is credited twice.
+
+### E3. The workflow rule
+
+Setup → **Automation → Workflow Rules → Create Rule**, on **both** Invoices and Sales Orders:
+
+| | |
+|---|---|
+| Rule name | `Rivhit — log post-issuance changes` |
+| When | On a record action → **Edit** → repeat whenever a record is edited |
+| Condition | `Rivhit Document Number` **is not empty** |
+| Action | Function → `rv_log_change` |
+| Arguments | `recId` → the record Id · `moduleArg` → literal `Invoices` (or `Sales_Orders`) |
+
+The condition is not decoration. Without it the rule fires on ordinary pre-issue editing and
+buries every record in notes.
+
+### E4. The schedule
+
+Setup → **Automation → Actions → Schedules → + Configure Schedule** → name
+`Rivhit Payment Reconciliation` → **every 6 hours** → function `rv_reconcile` → save and
+**activate**.
+
+Without it nothing syncs and payment status is manual only.
+
+### E5. Place the buttons
+
+Setup → **Modules and Fields → Invoices → Links and Buttons**. Confirm all five appear in the
+**Detail Page** layout, then repeat for Sales Orders. Check the mass actions on Accounts,
+Contacts and Products.
+
+---
+
+# Phase F — Zoho-side behaviour
+
+No Rivhit. These are the tests people usually skip and then discover in production.
+
+### F1. The unique constraint really is unique
+
+Create a `Rivhit_Receipts` record with `ICredit_Sale_ID = test-123`. Create a second with the
+same value. **The second must be rejected.** If it saves, phase E2 did not take — go back, or
+the IPN handler has no concurrency guard at all.
+
+### F2. Duplicate IPN handling
+
+```bash
+curl -X POST "<your rv_icredit_ipn URL>" -d "SaleId=probe-001&TransactionAmount=1"
+curl -X POST "<your rv_icredit_ipn URL>" -d "SaleId=probe-001&TransactionAmount=1"
+```
+
+First call: claims the sale, then rejects it at the Verify check (no real sale exists) and
+returns JSON. Second call: `"code":"duplicate"`. Both return HTTP 200.
+
+If the second call is *not* a duplicate, the claim is not working. If either returns an HTML
+error page instead of JSON, the function threw — which in production would trigger a resend
+storm.
+
+### F3. Post-issuance drift notes
+
+On a test invoice, type a fake number into `Rivhit_Document_Number` by hand. Save. Now edit a
+line item. **A note should appear** naming the field, old → new, and who changed it. Then
+clear the number and edit again — **no note** this time.
+
+### F4. Escaping
+
+Set an invoice `Subject` to `<img src=x onerror=alert(1)>` and open the issue widget. It must
+render as inert text. No alert.
+
+### F5. Field-rejection handling
+
+Temporarily shorten `Rivhit_Paid_Amount` to a length that cannot hold the value, run a refresh,
+and confirm you get a **"saved, but field X skipped"** warning rather than a silent failure.
+Restore it to Currency 16,2.
+
+### F6. Permission enforcement
+
+In Settings → Permissions, untick a non-admin profile for *Issue document*. Log in as a user
+with that profile and press the button. It should be **disabled** — and if the function is
+invoked directly, it must return a refusal. Hiding a button is not access control; the
+function is the boundary.
+
+---
+
+# Phase G — documents, on the demo account
+
+### G1. Dry runs first — free, create nothing
+
+For each mapped document type, open an invoice and press **בדיקה בלבד**. This validates real
+payloads against the real API without issuing anything and without touching the quota. Fix
+every failure here before issuing once.
+
+### G2. Then issue
+
+| Test | Expect |
+|---|---|
+| Issue a document | PDF total matches the CRM invoice to the agora |
+| Reopen the invoice | The already-issued card, not the form |
+| Document number in the Hebrew UI | Renders left-to-right, not scrambled |
+| Issue again | Refused as a duplicate; no second document |
+| Kill the tab mid-issue, reopen, **Recover** | Finds the document; no duplicate |
+| Record a partial payment | `Partially Paid`, correct amount |
+| A second partial completes it | `Paid`; both receipts in `Rivhit_Receipts` |
+| **Mark as settled** | Closes with no document; quota unchanged. **Reopen** reverses it |
+| Cancel an **invoice-receipt** | **Both** halves reversed in Rivhit |
+| Sync the same account twice | Updated, never a second customer |
+| AR report | Totals match Rivhit's own aging report |
+| Hebrew customer name and item description | Correct on the PDF, no mojibake |
+
+---
+
+# Phase H — iCredit
+
+Needs a separate iCredit test token; the Rivhit demo account is not connected to it.
+
+1. Settings → iCredit tab → enable, test mode, paste the group tokens.
+2. Paste both IPN URLs from A3 and a thank-you page URL.
+3. **Set "iCredit issues the document" to match how the payment page is actually
+   configured.** Getting this wrong produces two tax documents for one payment, and the
+   customer sees both.
+4. In the iCredit back office: set **IPN URL** and **IPN Failure URL** separately. Left unset,
+   declines arrive at the success endpoint — once per failed attempt.
+5. Test: a real test charge fires the IPN · a **replayed** IPN changes nothing · a **declined**
+   card marks nothing paid · **exactly one** tax document exists afterwards.
+
+Optional allowlist: iCredit posts from `82.80.194.52`, `81.218.62.41`, `31.168.238.28`.
+
+---
+
+# Phase I — production
+
+1. Phases F–H clean on demo.
+2. Settings → replace the token → **Account type = production**.
+3. **Refresh the catalog again.** The demo account's type codes are not yours.
+4. **Now map the roles** — default for Invoices, default for Sales Orders, credit type,
+   default receipt type — and map every CRM payment method to a Rivhit code. Do not assume the
+   defaults; codes differ per business.
+5. Confirm the VAT / exempt sort codes against your Rivhit configuration.
+6. If you are in the חשבוניות ישראל regime: tick it, enter the approver's ת.ז, and confirm the
+   Tax Authority link is enabled in Rivhit **under the same user that owns the API token**.
+   Under any other user, documents issue with no allocation number and your customers cannot
+   deduct input VAT.
+7. **Dry run one document of each mapped role against production.** Free, real catalog,
+   creates nothing — a production rehearsal with no consequences.
+8. Issue one real low-value document and verify it end to end in Rivhit.
+9. Confirm the schedule has run at least once.
+
+---
+---
+
+# Appendix A — custom fields
+
+## A.1 Invoices **and** Sales Orders (identical on both)
 
 | Label | API name | Type |
 |---|---|---|
@@ -107,7 +424,7 @@ undersized numeric field rejects writes, and one rejected field kills the entire
 | iCredit Auth Number | `ICredit_Auth_Number` | Single Line |
 | iCredit Card Last4 | `ICredit_Card_Last4` | Single Line |
 
-### 3.2 Accounts **and** Contacts
+## A.2 Accounts **and** Contacts
 
 `Rivhit_Customer_ID` (Number) · `Rivhit_Acc_Ref` (Single Line, **max 9**) ·
 `Rivhit_Tax_ID` (Single Line) · `Rivhit_VAT_Number` (Single Line) ·
@@ -116,58 +433,45 @@ undersized numeric field rejects writes, and one rejected field kills the entire
 `Rivhit_Balance_Updated` (Date/Time) · `Rivhit_Last_Sync` (Date/Time) ·
 `Rivhit_Sync_Error` (Multi Line)
 
-### 3.3 Products
+## A.3 Products
 
 `Rivhit_Item_ID` (Number) · `Rivhit_Catalog_Number` (Single Line, ≤15) ·
 `Rivhit_Item_Group_ID` (Number) · `Rivhit_Storage_ID` (Number) ·
 `Rivhit_Quantity_On_Hand` (Number) · `Rivhit_Quantity_Updated` (Date/Time)
 
----
+## A.4 Custom module `Rivhit_Receipts`
 
-## 4. Custom module `Rivhit_Receipts`
+Singular *Rivhit Receipt*, plural *Rivhit Receipts*, **API name `Rivhit_Receipts`**.
 
-Setup → **Modules and Fields → Create Module**. Singular *Rivhit Receipt*, plural
-*Rivhit Receipts*, **API name `Rivhit_Receipts`**.
-
-| Label | API name | Type | Notes |
-|---|---|---|---|
-| Receipt Name | `Name` | Single Line | the module's default record-name field |
-| iCredit Sale ID | `ICredit_Sale_ID` | Single Line — **tick “Unique”** | ⚠ see below |
-| Processing State | `Processing_State` | Picklist — `Claimed`, `Applied`, `Rejected` | |
-| Rejection Reason | `Rejection_Reason` | Multi Line | |
-| Receipt Type | `Receipt_Type` | Number | |
-| Receipt Number | `Receipt_Number` | Number | |
-| Receipt Identity | `Receipt_Identity` | Single Line | |
-| Receipt Amount | `Receipt_Amount` | **Currency 16,2** | |
-| Receipt Date | `Receipt_Date` | Date | |
-| Payment Method | `Payment_Method` | Single Line | |
-| Receipt URL | `Receipt_URL` | URL | |
-| Closed Document Type | `Closed_Document_Type` | Number | |
-| Closed Document Number | `Closed_Document_Number` | Number | |
-| Invoice | `Invoice` | Lookup → Invoices | |
-| Account | `Account` | Lookup → Accounts | |
-| Source | `Source` | Picklist — `CRM`, `iCredit`, `Rivhit` | |
-
-> ### ⚠ `ICredit_Sale_ID` must be Unique. This is not optional.
->
-> iCredit requires a 200 OK within **1.25 seconds** or it resends the notification, and a
-> Zoho function's cold start alone can exceed that. Duplicate deliveries are normal traffic.
-> Deluge has no locks, so the unique constraint **is** the mutex: the IPN handler's first
-> action is to claim the sale id, and the loser of a concurrent race is rejected by the
-> platform and stops. Without the constraint, two simultaneous deliveries both proceed and
-> the customer is credited twice.
+| Label | API name | Type |
+|---|---|---|
+| Receipt Name | `Name` | Single Line (default record-name field) |
+| iCredit Sale ID | `ICredit_Sale_ID` | Single Line — **tick “Unique”** |
+| Processing State | `Processing_State` | Picklist — `Claimed`, `Applied`, `Rejected` |
+| Rejection Reason | `Rejection_Reason` | Multi Line |
+| Receipt Type | `Receipt_Type` | Number |
+| Receipt Number | `Receipt_Number` | Number |
+| Receipt Identity | `Receipt_Identity` | Single Line |
+| Receipt Amount | `Receipt_Amount` | **Currency 16,2** |
+| Receipt Date | `Receipt_Date` | Date |
+| Payment Method | `Payment_Method` | Single Line |
+| Receipt URL | `Receipt_URL` | URL |
+| Closed Document Type | `Closed_Document_Type` | Number |
+| Closed Document Number | `Closed_Document_Number` | Number |
+| Invoice | `Invoice` | Lookup → Invoices |
+| Account | `Account` | Lookup → Accounts |
+| Source | `Source` | Picklist — `CRM`, `iCredit`, `Rivhit` |
 
 ---
 
-## 5. Organisation variables
+# Appendix B — organisation variables
 
-Sigma editor → **Storage → Organisation Variables**. Create every one as **Text**. Sigma
-prefixes them automatically with `rivhitzohocrmextension__`.
+All **Text**, created blank. Sigma prefixes each with `rivhitzohocrmextension__`.
 
 | Name | Purpose |
 |---|---|
 | `API_Token` | Rivhit api_token |
-| `Company_ID` | for PDF links |
+| `Company_ID` | builds PDF links |
 | `Account_Mode` | `demo` / `production` |
 | `Default_Language` | `he` / `en` |
 | `Type_Cache` | JSON catalog snapshot (written by the app) |
@@ -181,83 +485,24 @@ prefixes them automatically with `rivhitzohocrmextension__`.
 | `Send_Mail_Default` | `true` / `false` |
 | `Digital_Signature` | `true` / `false` |
 | `Confirmation_Required` | `true` / `false` |
-| `Approver_ID_Number` | ת.ז used for retroactive allocation numbers |
+| `Approver_ID_Number` | ת.ז for retroactive allocation numbers |
 | `Monthly_Doc_Quota` | blank = no warning threshold |
 | `Reconcile_Window_Days` | default `35` |
 | `ICredit_Enabled` | `true` / `false` |
-| `ICredit_Issues_Document` | `true` / `false` — **the most consequential setting** |
+| `ICredit_Issues_Document` | `true` / `false` |
 | `ICredit_Test_Mode` | `true` / `false` |
 | `ICredit_Group_Token_Prod` | |
 | `ICredit_Group_Token_Test` | |
-| `ICredit_IPN_URL` | filled in at step 7 |
-| `ICredit_IPN_Failure_URL` | filled in at step 7 |
+| `ICredit_IPN_URL` | from phase A3 |
+| `ICredit_IPN_Failure_URL` | from phase A3 |
 | `ICredit_Redirect_URL` | thank-you page |
 | `Usage_Counter` | JSON, written by the app |
 | `Sync_State` | JSON cursor, written by the app |
-| `Health_State` | written by the scheduled reconciler |
-
-Leave the values blank — step 12 fills them through the Settings widget.
+| `Health_State` | written by the reconciler |
 
 ---
 
-## 6. Deluge functions
-
-Sigma editor → **Functions → Create Function**. For each one: paste the **body only** from
-`functions/<name>.deluge`. A signature line in the body is a syntax error — Sigma generates
-the wrapper itself.
-
-| # | Function name | Category | Return | Argument |
-|---|---|---|---|---|
-| 1 | `rv_lookup` | REST API | STRING | `crmAPIRequest` |
-| 2 | `rv_save_settings` | REST API | STRING | `crmAPIRequest` |
-| 3 | `rv_issue_document` | REST API | STRING | `crmAPIRequest` |
-| 4 | `rv_issue_receipt` | REST API | STRING | `crmAPIRequest` |
-| 5 | `rv_close_document` | REST API | STRING | `crmAPIRequest` |
-| 6 | `rv_cancel_document` | REST API | STRING | `crmAPIRequest` |
-| 7 | `rv_confirmation` | REST API | STRING | `crmAPIRequest` |
-| 8 | `rv_recover_request` | REST API | STRING | `crmAPIRequest` |
-| 9 | `rv_upsert_customer` | REST API | STRING | `crmAPIRequest` |
-| 10 | `rv_sync_products` | REST API | STRING | `crmAPIRequest` |
-| 11 | `rv_reconcile` | REST API | STRING | *(none)* |
-| 12 | `rv_icredit_get_url` | REST API | STRING | `crmAPIRequest` |
-| 13 | `rv_icredit_ipn` | REST API | STRING | `crmAPIRequest` |
-| 14 | `rv_icredit_ipn_failure` | REST API | STRING | `crmAPIRequest` |
-| 15 | `rv_log_change` | **Automation** | STRING | `recId` (String), `moduleArg` (String) |
-
-`crmAPIRequest` is type **Map**. For #15 the two arguments are mapped by the workflow rule
-in step 9.
-
-Save each one and confirm it compiles before moving on. If a function reports an error on
-its last line, you almost certainly pasted a signature line with it.
-
----
-
-## 7. Publish the two IPN endpoints
-
-Only `rv_icredit_ipn` and `rv_icredit_ipn_failure`.
-
-1. Open the function → **⋯ → REST API** → enable it → choose **API Key**.
-2. Copy the generated URL. It looks like:
-
-```
-https://www.zohoapis.com/crm/v2/functions/rv_icredit_ipn/actions/execute?auth_type=apikey&zapikey=1003.xxxx
-```
-
-3. Keep both URLs — they go into Settings (step 12) and the iCredit back office (step 13).
-
-> Only ports 80 and 443 are accepted by iCredit, and the whole path must be publicly
-> reachable; the Zoho endpoint satisfies both. Treat the `zapikey` as a secret, but never as
-> the security boundary — the four checks inside the function are.
-
----
-
-## 8. Upload the widgets
-
-1. Sigma editor → **Widgets → Upload** → `rivhit-bridge-V1.0-r1.zip`.
-2. Confirm all 15 widget registrations appear (9 widgets; the record-level ones are
-   registered twice, once per host module).
-3. **Publish** → **Major version** → install/update into the org.
-4. When prompted, **accept the scopes**. The extension requests:
+# Appendix C — scopes
 
 ```
 ZohoCRM.modules.invoices.READ / UPDATE
@@ -273,185 +518,33 @@ ZohoCRM.settings.profiles.READ      (permissions matrix)
 ZohoCRM.users.READ                  (resolve the caller's profile)
 ```
 
-5. Open any widget and check the browser console for **`[Rivhit API] BUILD V1.0-r1`**.
-   An older marker means the publish or the cache did not take — **stop and fix that before
-   continuing**, or you will debug code that is not running.
+Scope changes force admin re-consent on update, so settle the set before the first production
+publish.
 
 ---
 
-## 9. Workflow rule — post-issuance change notes
-
-Create on **both** Invoices and Sales Orders.
-
-Setup → **Automation → Workflow Rules → Create Rule**
-
-| | |
-|---|---|
-| Module | Invoices *(then repeat for Sales Orders)* |
-| Rule name | `Rivhit — log post-issuance changes` |
-| When | **On a record action → Edit** → *Repeat this workflow whenever a record is edited* |
-| Condition | `Rivhit Document Number` **is not empty** |
-| Action | **Function → `rv_log_change`** |
-
-Map the arguments: `recId` → **Invoice Id** (or Sales Order Id), `moduleArg` → the literal
-string `Invoices` (or `Sales_Orders`).
-
-> The condition is not decoration. Without it the rule fires on ordinary pre-issue editing
-> and buries every record in notes.
-
----
-
-## 10. Scheduled reconciliation
-
-Setup → **Automation → Actions → Schedules → + Configure Schedule**
-
-| | |
-|---|---|
-| Name | `Rivhit Payment Reconciliation` |
-| Frequency | Every 6 hours |
-| Function | `rv_reconcile` |
-
-Save, **activate**, and confirm the first run in the execution log.
-
-> Without this schedule nothing syncs and payment status is manual only. Say so to users if
-> you choose not to create it.
-
----
-
-## 11. Add the buttons
-
-The manifest registers the button widgets, but Zoho still needs them placed.
-
-Setup → **Customization → Modules and Fields → Invoices → Links and Buttons**. Confirm
-these exist and are visible in the **Detail Page** layout:
-
-- הפקת מסמך ברווחית
-- רישום תשלום / קבלה
-- קישור לתשלום (iCredit)
-- רענון סטטוס מרווחית
-- ביטול מסמך ברווחית
-
-Repeat for **Sales Orders**. For **Accounts**, **Contacts** and **Products**, confirm the
-mass-action buttons appear in the list view's **Actions** menu.
-
----
-
-## 12. Configure through the Settings widget
-
-Setup → **Marketplace → Installed → Rivhit Bridge → Settings** (or the extension's
-Settings tab).
-
-**Connection tab**
-1. Paste the API Token and Company ID. Set **Account type** — this is displayed on every
-   write widget, so get it right.
-2. **Test Connection.** Green with the business name means the token works.
-3. Type discovery runs automatically on success.
-
-**Document types tab**
-4. **Refresh catalog from Rivhit.** Every document and receipt type your account has
-   appears, with its flags.
-5. Set the four roles: default for Invoices, default for Sales Orders, credit type, default
-   receipt type. Only these need mapping — everything else is chosen at issue time.
-6. Map each CRM payment method to a Rivhit payment code. **Do not assume the defaults** —
-   codes differ per business.
-
-**Document defaults tab**
-7. Confirm the VAT / exempt sort codes against your Rivhit configuration (Rivhit's defaults
-   are 100 / 150).
-8. Set the default currency, stock behaviour, mail and signature options.
-9. If you are in the חשבוניות ישראל regime, tick **Confirmation numbers** and enter the
-   approver's ת.ז.
-
-**iCredit tab**
-10. Enable, set test mode, paste both group tokens.
-11. Paste the two IPN URLs from step 7 and a thank-you page URL.
-12. **Set “iCredit issues the document” to match how the payment page is actually
-    configured.** Read the explanation the widget shows — getting this wrong produces two
-    tax documents for one payment, and the customer sees both.
-
-**Permissions tab**
-13. Tick which profiles may perform each action. Defaults are Administrator-only for
-    everything that writes. You cannot remove your own Settings access.
-
-14. **Save**, reload the widget, and confirm every value persisted.
-
----
-
-## 13. iCredit back office
-
-Log in to iCredit → payment page settings:
-
-1. **IPN URL** → the `rv_icredit_ipn` URL.
-2. **IPN Failure URL** → the `rv_icredit_ipn_failure` URL. Do not skip this: left unset,
-   declines arrive at the success endpoint, once per failed attempt.
-3. Confirm whether the page issues a document, and make it agree with step 12.
-4. Optional allowlist: iCredit posts from `82.80.194.52`, `81.218.62.41`, `31.168.238.28`.
-
----
-
-## 14. Smoke test — on the demo account
-
-Work through `DEPLOYMENT.md` §9 for the full acceptance list. The minimum before going near
-production:
-
-| # | Test | Pass |
-|---|---|---|
-| 1 | Console shows `BUILD V1.0-r1` in every widget | ☐ |
-| 2 | Test Connection green, catalog loads with your real types | ☐ |
-| 3 | Settings survive a reload; the secret is never echoed back | ☐ |
-| 4 | **Dry run** on an invoice with a deliberate error is rejected and **no document is created** | ☐ |
-| 5 | Issue a document; the PDF total matches the CRM invoice to the agora | ☐ |
-| 6 | Reopen the invoice → the already-issued card shows, not the form | ☐ |
-| 7 | Document number renders left-to-right inside the Hebrew UI | ☐ |
-| 8 | Issue again → refused as a duplicate, no second document | ☐ |
-| 9 | Kill the tab mid-issue, reopen → **Recover** finds the document, no duplicate | ☐ |
-| 10 | Record a partial payment → status `Partially Paid`, right amount | ☐ |
-| 11 | Second partial completes it → `Paid`, receipts appear in `Rivhit_Receipts` | ☐ |
-| 12 | Mark as settled closes without creating a document; Reopen reverses it | ☐ |
-| 13 | Cancel an **invoice-receipt** → *both* halves reversed in Rivhit | ☐ |
-| 14 | Sync the same account twice → updated, never a second customer | ☐ |
-| 15 | Edit an issued invoice → a note appears naming the change | ☐ |
-| 16 | A non-permitted profile gets a refusal, not a document | ☐ |
-| 17 | AR report totals match Rivhit's own aging report | ☐ |
-| 18 | With iCredit: test charge fires the IPN; a **replayed** IPN changes nothing; a declined card marks nothing paid; **exactly one** tax document exists | ☐ |
-
----
-
-## 15. Going to production
-
-1. Re-run the smoke test on the demo account until it is clean.
-2. Settings → replace the token, set **Account type = production**.
-3. **Refresh the catalog again** — the demo account's type codes are not yours, so the role
-   mapping must be redone against the real catalog.
-4. Run a **dry run** (`check_only`) on one document of each mapped role. It is free, uses the
-   real catalog, and creates nothing — a production rehearsal with no consequences.
-5. Issue one real low-value document and verify it in Rivhit end to end.
-6. Confirm the scheduled function has run at least once.
-
----
-
-## 16. Troubleshooting
+# Appendix D — troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Console shows an old build marker | Publish or cache did not take | Re-publish as a major version, hard-refresh, re-open |
-| “ההרחבה טרם הוגדרה” everywhere | `API_Token` org variable missing or blank | Step 5, then step 12 |
-| Function fails to compile on its last line | A signature line was pasted with the body | Paste the **body only** |
-| Settings save reports success but values vanish | Org variable not created, or the name is misspelled | Compare against step 5 exactly; the save function reads back and reports mismatches |
-| `updateRecord` succeeds but fields stay empty | Field API name mismatch | The code resolves plain and namespaced names — check the field actually exists on **both** Invoices and Sales Orders |
-| “saved, but field X skipped” warning | That field is misconfigured — usually a Currency field too short | Recreate it as Currency 16,2 |
-| Document number renders scrambled in Hebrew | Value rendered without bidi isolation | Report it — every number should go through `ltrHtml` |
-| Duplicate receipts from one card payment | `ICredit_Sale_ID` is not marked Unique | Step 4. This is the whole concurrency guard. |
-| Payment marked paid on a declined card | `IPNFailureURL` not set, so declines hit the success endpoint | Steps 7 and 13 |
-| Two tax documents per card payment | `ICredit_Issues_Document` disagrees with the iCredit page | Step 12 |
-| Invoices never move to Paid | The schedule was never created or activated | Step 10 |
-| Reconciliation reports “deferred” every run | Volume exceeds the per-run detail budget | Normal — it resumes next run. Raise the frequency if the backlog does not clear. |
-| “האסימון של רווחית נדחה” banner | The token was regenerated in Rivhit | Re-enter it in Settings |
-| Invoice with no document but a request reference | An issue was interrupted | Open the issue widget → **Recover**. Never just issue again. |
+| Function errors on its last line | A signature line was pasted with the body | Paste the **body only** |
+| Console shows an old build marker | Publish or cache did not take | Re-publish as major, hard-refresh |
+| “ההרחבה טרם הוגדרה” everywhere | `API_Token` missing or blank | Phase B1, then C1 |
+| Save reports success but values vanish | Org variable missing or misnamed | Compare to Appendix B exactly — the save function reads back and reports mismatches |
+| `updateRecord` succeeds but fields stay empty | Field API name mismatch | The code resolves plain and namespaced names — check the field exists on **both** Invoices and Sales Orders |
+| “saved, but field X skipped” | That field is misconfigured, usually a short Currency field | Recreate as Currency 16,2 |
+| Document number scrambled in Hebrew | Rendered without bidi isolation | Report it — every number should go through `ltrHtml` |
+| Duplicate receipts from one card payment | `ICredit_Sale_ID` is not Unique | Phase E2. This is the entire concurrency guard. |
+| Payment marked paid on a declined card | `IPNFailureURL` not set | Phases A3 and H |
+| Two tax documents per card payment | `ICredit_Issues_Document` disagrees with the iCredit page | Phase H3 |
+| Invoices never move to Paid | Schedule never created or activated | Phase E4 |
+| Reconciliation reports “deferred” each run | Volume exceeds the per-run detail budget | Normal — it resumes. Raise the frequency if the backlog does not clear. |
+| “האסימון של רווחית נדחה” banner | Token regenerated in Rivhit | Re-enter it in Settings |
+| Invoice with a request reference but no document | An issue was interrupted | Issue widget → **Recover**. Never just issue again. |
 
-**Debug mode.** Append `?rvdebug=1` to a widget URL for verbose console logging. Build
-markers, warnings and errors always print.
+**Debug mode:** append `?rvdebug=1` to a widget URL for verbose console logging. Build markers,
+warnings and errors always print.
 
-**Where the logs are.** Deluge `info` output goes to the function's execution log in Sigma
-(and to the Schedules log for `rv_reconcile`). Every Rivhit `debug_message` is logged there;
-only the Hebrew `client_message` is ever shown to a user.
+**Logs:** Deluge `info` output goes to the function's execution log in Sigma, and to the
+Schedules log for `rv_reconcile`. Every Rivhit `debug_message` lands there; only the Hebrew
+`client_message` is ever shown to a user.
