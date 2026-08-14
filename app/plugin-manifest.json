@@ -144,6 +144,39 @@
       }
     ]
   },
+  "storage": {
+    "org_variable": [
+      { "name": "API_Token",                "description": "Rivhit API token" },
+      { "name": "Company_ID",               "description": "Rivhit company id, used to build PDF links" },
+      { "name": "Account_Mode",             "description": "demo or production — there is no separate Rivhit sandbox host" },
+      { "name": "Default_Language",         "description": "he or en — document language and widget direction" },
+      { "name": "Type_Cache",               "description": "JSON snapshot of the Rivhit type catalog" },
+      { "name": "Doc_Type_Roles",           "description": "JSON: default invoice, default sales order, credit, default receipt" },
+      { "name": "Payment_Type_Map",         "description": "JSON: CRM payment method to Rivhit payment_type" },
+      { "name": "Action_Permissions",       "description": "JSON permissions matrix, enforced server-side" },
+      { "name": "Sort_Code_VAT",            "description": "Rivhit sort code for VAT-liable documents" },
+      { "name": "Sort_Code_Exempt",         "description": "Rivhit sort code for VAT-exempt documents" },
+      { "name": "Default_Currency_ID",      "description": "Rivhit currency code used when the record does not specify one" },
+      { "name": "Default_Update_Inventory", "description": "Initial state of the per-document stock checkbox" },
+      { "name": "Send_Mail_Default",        "description": "Whether Rivhit emails the document by default" },
+      { "name": "Digital_Signature",        "description": "Sign documents digitally" },
+      { "name": "Confirmation_Required",    "description": "Business is in the Israel Tax Authority allocation-number regime" },
+      { "name": "Approver_ID_Number",       "description": "ID number used to request an allocation number retroactively" },
+      { "name": "Monthly_Doc_Quota",        "description": "Subscribed monthly document tier; blank disables the warning" },
+      { "name": "Reconcile_Window_Days",    "description": "Rolling window for the scheduled reconciliation" },
+      { "name": "ICredit_Enabled",          "description": "Enable the iCredit payment gateway features" },
+      { "name": "ICredit_Issues_Document",  "description": "True when the iCredit page issues the tax document itself" },
+      { "name": "ICredit_Test_Mode",        "description": "Use the iCredit test host and test token" },
+      { "name": "ICredit_Group_Token_Prod", "description": "iCredit GroupPrivateToken, production" },
+      { "name": "ICredit_Group_Token_Test", "description": "iCredit GroupPrivateToken, test" },
+      { "name": "ICredit_IPN_URL",          "description": "Public endpoint for successful payment notifications" },
+      { "name": "ICredit_IPN_Failure_URL",  "description": "Separate endpoint for declined charges" },
+      { "name": "ICredit_Redirect_URL",     "description": "Thank-you page shown after a successful payment" },
+      { "name": "Usage_Counter",            "description": "JSON monthly document issuance counter" },
+      { "name": "Sync_State",               "description": "JSON cursor for resumable batch jobs" },
+      { "name": "Health_State",             "description": "Set by the reconciler when Rivhit rejects the token" }
+    ]
+  },
   "connectedapp": {
     "permissions": [
       "ZohoCRM.modules.invoices.READ",

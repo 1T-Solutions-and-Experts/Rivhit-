@@ -163,6 +163,28 @@ def main():
                      'dry run and no document would be created' % name)
     ok('%d Deluge bodies pass hygiene checks' % len(deluge))
 
+    # ── 2b. Manifest org variables must match what the Deluge actually reads ──
+    # Manifest-declared variables are auto-provisioned on install. The
+    # predecessor extension shipped a manifest declaring names nothing read,
+    # while the code read names nothing declared — every fresh install came up
+    # broken and it took several sessions to find. Assert both directions.
+    print('[2b/6] reconciling org variables')
+    declared = set(v['name'] for v in manifest.get('storage', {}).get('org_variable', []))
+    used = set()
+    var_re = re.compile(r'prefix\s*\+\s*"([A-Za-z0-9_]+)"')
+    for p in deluge:
+        for m in var_re.finditer(open(p, encoding='utf-8').read()):
+            used.add(m.group(1))
+    missing = used - declared
+    orphans = declared - used
+    if missing:
+        fail('the Deluge reads org variable(s) the manifest does not declare, so a fresh '
+             'install will not provision them: %s' % ', '.join(sorted(missing)))
+    if orphans:
+        fail('the manifest declares org variable(s) no function reads: %s — remove them or '
+             'they become install-time orphans' % ', '.join(sorted(orphans)))
+    ok('%d org variables declared and all of them used' % len(declared))
+
     # ── 3. Tests ────────────────────────────────────────────────────────
     print('[3/6] running tests')
     tests = sorted(glob.glob(os.path.join(ROOT, 'tests', '*.test.js')))

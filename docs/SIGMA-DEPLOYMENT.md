@@ -10,7 +10,7 @@ expensive is built.
 | Phase | What it proves | Time | Needs Rivhit? |
 |---|---|---|---|
 | **A** | The code compiles and the bundle loads | 40 min | no |
-| **B** | Configuration round-trips | 20 min | no |
+| **B** | Configuration round-trips | 10 min | no |
 | **C** | Rivhit answers us | 10 min | demo, reads only |
 | **D** | The C1 idempotency assumption holds | 5 min | demo, 1 document |
 | **E** | Fields and the receipts module exist | 60 min | no |
@@ -123,10 +123,20 @@ and without touching Rivhit or creating a single field.
 Still no Rivhit. This phase catches namespace typos, which otherwise break everything
 silently and are miserable to diagnose later.
 
-### B1. Create the organisation variables
+### B1. Confirm the organisation variables were provisioned
 
-Sigma editor → **Storage → Organisation Variables**. All **Text**, all values left blank.
-Full list in Appendix B — 29 of them.
+**You should not have to create these by hand.** All 29 are declared in
+`plugin-manifest.json` under `storage.org_variable`, and Sigma provisions them automatically
+when the extension is installed in phase A4.
+
+Sigma editor → **Storage → Organisation Variables** and check the list against Appendix B. If
+any are missing, create them manually as **Text** with a blank value — but a missing variable
+usually means the install did not complete, which is worth understanding before continuing.
+
+> The build asserts, in both directions, that every variable the Deluge reads is declared in
+> the manifest and that the manifest declares nothing unused. The predecessor extension
+> shipped a manifest declaring dead names while the code read undeclared ones; every fresh
+> install came up broken and it took several sessions to diagnose.
 
 ### B2. 🚦 GATE — save and reload
 
@@ -466,7 +476,8 @@ Singular *Rivhit Receipt*, plural *Rivhit Receipts*, **API name `Rivhit_Receipts
 
 # Appendix B — organisation variables
 
-All **Text**, created blank. Sigma prefixes each with `rivhitzohocrmextension__`.
+Declared in `plugin-manifest.json` and **auto-provisioned on install** — this table is for
+verification, not data entry. Sigma prefixes each with `rivhitzohocrmextension__`.
 
 | Name | Purpose |
 |---|---|
